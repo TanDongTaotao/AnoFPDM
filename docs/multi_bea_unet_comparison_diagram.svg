@@ -1,0 +1,205 @@
+<svg width="1100" height="580" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font: bold 16px sans-serif; text-anchor: middle; }
+      .subtitle { font: bold 14px sans-serif; text-anchor: middle; }
+      .label { font: 12px sans-serif; text-anchor: middle; }
+      .small-label { font: 10px sans-serif; text-anchor: middle; }
+      .tiny-label { font: 8px sans-serif; text-anchor: middle; }
+      .legend { font: 11px sans-serif; }
+      .encoder { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .decoder { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2; }
+      .middle { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .bea { fill: #ffebee; stroke: #d32f2f; stroke-width: 2; }
+      .arrow { stroke: #333; stroke-width: 2; marker-end: url(#arrowhead); }
+      .skip { stroke: #666; stroke-width: 1; stroke-dasharray: 5,5; fill: none; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333" />
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="550" y="30" class="title">UNet Architecture Comparison: Original vs BEA vs Multi-BEA</text>
+
+  <!-- Original UNetV2 -->
+  <g transform="translate(50, 50)">
+    <text x="150" y="20" class="subtitle">Original UNetV2</text>
+    
+    <!-- Input -->
+    <rect x="125" y="40" width="50" height="20" class="encoder"/>
+    <text x="150" y="55" class="small-label">Input</text>
+    
+    <!-- Encoder blocks -->
+    <rect x="100" y="80" width="100" height="30" class="encoder"/>
+    <text x="150" y="100" class="label">Encoder 1</text>
+    
+    <rect x="75" y="130" width="150" height="30" class="encoder"/>
+    <text x="150" y="150" class="label">Encoder 2</text>
+    
+    <rect x="50" y="180" width="200" height="30" class="encoder"/>
+    <text x="150" y="200" class="label">Encoder 3 (Last)</text>
+    
+    <!-- Middle block -->
+    <rect x="25" y="230" width="250" height="40" class="middle"/>
+    <text x="150" y="255" class="label">Middle Block</text>
+    
+    <!-- Decoder blocks -->
+    <rect x="50" y="290" width="200" height="30" class="decoder"/>
+    <text x="150" y="310" class="label">Decoder 1</text>
+    
+    <rect x="75" y="340" width="150" height="30" class="decoder"/>
+    <text x="150" y="360" class="label">Decoder 2</text>
+    
+    <rect x="100" y="390" width="100" height="30" class="decoder"/>
+    <text x="150" y="410" class="label">Decoder 3 (Last)</text>
+    
+    <!-- Output -->
+    <rect x="125" y="440" width="50" height="20" class="decoder"/>
+    <text x="150" y="455" class="small-label">Output</text>
+    
+    <!-- Arrows -->
+    <line x1="150" y1="60" x2="150" y2="80" class="arrow"/>
+    <line x1="150" y1="110" x2="150" y2="130" class="arrow"/>
+    <line x1="150" y1="160" x2="150" y2="180" class="arrow"/>
+    <line x1="150" y1="210" x2="150" y2="230" class="arrow"/>
+    <line x1="150" y1="270" x2="150" y2="290" class="arrow"/>
+    <line x1="150" y1="320" x2="150" y2="340" class="arrow"/>
+    <line x1="150" y1="370" x2="150" y2="390" class="arrow"/>
+    <line x1="150" y1="420" x2="150" y2="440" class="arrow"/>
+    
+    <!-- Skip connections -->
+    <path d="M 250 95 Q 300 95 300 305 Q 300 305 250 305" class="skip"/>
+    <path d="M 225 145 Q 270 145 270 355 Q 270 355 225 355" class="skip"/>
+    <path d="M 200 195 Q 320 195 320 405 Q 320 405 200 405" class="skip"/>
+  </g>
+
+  <!-- BEA UNet -->
+  <g transform="translate(375, 50)">
+    <text x="150" y="20" class="subtitle">BEA UNet</text>
+    
+    <!-- Input -->
+    <rect x="125" y="40" width="50" height="20" class="encoder"/>
+    <text x="150" y="55" class="small-label">Input</text>
+    
+    <!-- Encoder blocks -->
+    <rect x="100" y="80" width="100" height="30" class="encoder"/>
+    <text x="150" y="100" class="label">Encoder 1</text>
+    
+    <rect x="75" y="130" width="150" height="30" class="encoder"/>
+    <text x="150" y="150" class="label">Encoder 2</text>
+    
+    <rect x="50" y="180" width="200" height="30" class="encoder"/>
+    <text x="150" y="200" class="label">Encoder 3 (Last)</text>
+    
+    <!-- Middle block -->
+    <rect x="25" y="230" width="250" height="40" class="middle"/>
+    <text x="150" y="255" class="label">Middle Block</text>
+    
+    <!-- Decoder blocks -->
+    <rect x="50" y="290" width="200" height="30" class="decoder"/>
+    <text x="150" y="310" class="label">Decoder 1</text>
+    
+    <rect x="75" y="340" width="150" height="30" class="decoder"/>
+    <text x="150" y="360" class="label">Decoder 2</text>
+    
+    <!-- Last decoder block with BEA -->
+    <rect x="100" y="390" width="100" height="30" class="bea"/>
+    <text x="150" y="405" class="label">Decoder 3 (Last)</text>
+    <text x="150" y="415" class="tiny-label">+ BEA</text>
+    
+    <!-- Output -->
+    <rect x="125" y="440" width="50" height="20" class="decoder"/>
+    <text x="150" y="455" class="small-label">Output</text>
+    
+    <!-- Arrows -->
+    <line x1="150" y1="60" x2="150" y2="80" class="arrow"/>
+    <line x1="150" y1="110" x2="150" y2="130" class="arrow"/>
+    <line x1="150" y1="160" x2="150" y2="180" class="arrow"/>
+    <line x1="150" y1="210" x2="150" y2="230" class="arrow"/>
+    <line x1="150" y1="270" x2="150" y2="290" class="arrow"/>
+    <line x1="150" y1="320" x2="150" y2="340" class="arrow"/>
+    <line x1="150" y1="370" x2="150" y2="390" class="arrow"/>
+    <line x1="150" y1="420" x2="150" y2="440" class="arrow"/>
+    
+    <!-- Skip connections -->
+    <path d="M 250 95 Q 300 95 300 305 Q 300 305 250 305" class="skip"/>
+    <path d="M 225 145 Q 270 145 270 355 Q 270 355 225 355" class="skip"/>
+    <path d="M 200 195 Q 320 195 320 405 Q 320 405 200 405" class="skip"/>
+  </g>
+
+  <!-- Multi-BEA UNet -->
+  <g transform="translate(700, 50)">
+    <text x="150" y="20" class="subtitle">Multi-BEA UNet</text>
+    
+    <!-- Input -->
+    <rect x="125" y="40" width="50" height="20" class="encoder"/>
+    <text x="150" y="55" class="small-label">Input</text>
+    
+    <!-- Encoder blocks -->
+    <rect x="100" y="80" width="100" height="30" class="encoder"/>
+    <text x="150" y="100" class="label">Encoder 1</text>
+    
+    <rect x="75" y="130" width="150" height="30" class="encoder"/>
+    <text x="150" y="150" class="label">Encoder 2</text>
+    
+    <!-- Last encoder block with BEA -->
+    <rect x="50" y="180" width="200" height="30" class="bea"/>
+    <text x="150" y="195" class="label">Encoder 3 (Last)</text>
+    <text x="150" y="205" class="tiny-label">+ BEA</text>
+    
+    <!-- Middle block with BEA -->
+    <rect x="25" y="230" width="250" height="40" class="bea"/>
+    <text x="150" y="250" class="label">Middle Block</text>
+    <text x="150" y="260" class="tiny-label">+ BEA</text>
+    
+    <!-- First decoder block with BEA -->
+    <rect x="50" y="290" width="200" height="30" class="bea"/>
+    <text x="150" y="305" class="label">Decoder 1 (First)</text>
+    <text x="150" y="315" class="tiny-label">+ BEA</text>
+    
+    <!-- Regular decoder blocks -->
+    <rect x="75" y="340" width="150" height="30" class="decoder"/>
+    <text x="150" y="360" class="label">Decoder 2</text>
+    
+    <rect x="100" y="390" width="100" height="30" class="decoder"/>
+    <text x="150" y="410" class="label">Decoder 3 (Last)</text>
+    
+    <!-- Output -->
+    <rect x="125" y="440" width="50" height="20" class="decoder"/>
+    <text x="150" y="455" class="small-label">Output</text>
+    
+    <!-- Arrows -->
+    <line x1="150" y1="60" x2="150" y2="80" class="arrow"/>
+    <line x1="150" y1="110" x2="150" y2="130" class="arrow"/>
+    <line x1="150" y1="160" x2="150" y2="180" class="arrow"/>
+    <line x1="150" y1="210" x2="150" y2="230" class="arrow"/>
+    <line x1="150" y1="270" x2="150" y2="290" class="arrow"/>
+    <line x1="150" y1="320" x2="150" y2="340" class="arrow"/>
+    <line x1="150" y1="370" x2="150" y2="390" class="arrow"/>
+    <line x1="150" y1="420" x2="150" y2="440" class="arrow"/>
+    
+    <!-- Skip connections -->
+    <path d="M 250 95 Q 300 95 300 305 Q 300 305 250 305" class="skip"/>
+    <path d="M 225 145 Q 270 145 270 355 Q 270 355 225 355" class="skip"/>
+    <path d="M 250 195 Q 320 195 320 305 Q 320 305 250 305" class="skip"/>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(50, 540)">
+    <rect x="0" y="0" width="20" height="15" class="encoder"/>
+    <text x="25" y="12" class="legend">Encoder/Input/Output</text>
+    
+    <rect x="150" y="0" width="20" height="15" class="middle"/>
+    <text x="175" y="12" class="legend">Middle Block</text>
+    
+    <rect x="280" y="0" width="20" height="15" class="decoder"/>
+    <text x="305" y="12" class="legend">Decoder</text>
+    
+    <rect x="380" y="0" width="20" height="15" class="bea"/>
+    <text x="405" y="12" class="legend">With BEA Module</text>
+    
+    <line x1="520" y1="7" x2="540" y2="7" class="skip"/>
+    <text x="545" y="12" class="legend">Skip Connection</text>
+  </g>
+</svg>
