@@ -172,6 +172,7 @@ def create_model(
     clf_free=True,
     use_bea=False,
     use_multi_bea=False,
+    use_hae=False,
 ):
     if channel_mult == "":
         if image_size == 512:
