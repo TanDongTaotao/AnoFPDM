@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
@@ -219,8 +220,15 @@ class MultiBEAUNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
 
-        if self.num_classes is not None:
-            self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+        if self.num_classes is not None and clf_free:
+            self.label_emb = nn.Embedding(self.num_classes, model_channels)
+            self.class_emb = nn.Sequential(
+                linear(model_channels, time_embed_dim),
+                nn.SiLU(),
+                linear(time_embed_dim, time_embed_dim),
+            )
+        elif self.num_classes is not None and not clf_free:
+            self.label_emb = nn.Embedding(self.num_classes, time_embed_dim)
 
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
@@ -315,7 +323,22 @@ class MultiBEAUNetModel(nn.Module):
         if self.use_multi_bea:
             self.middle_bea_module = MultiBoundaryAwareAttention(ch, dims=dims)
 
+        # Store encoder channel info before decoder construction modifies input_block_chans
+        encoder_ch_for_bea = None
+        if self.use_multi_bea and self.encoder_bea_block_idx < len(input_block_chans):
+            encoder_ch_for_bea = input_block_chans[self.encoder_bea_block_idx]
+        
+        # Create BEA modules before decoder construction
+        if self.use_multi_bea:
+            # BEA for last encoder block
+            encoder_ch = encoder_ch_for_bea if encoder_ch_for_bea is not None else ch
+            self.encoder_bea_module = MultiBoundaryAwareAttention(encoder_ch, dims=dims)
+            
+            # BEA for first decoder block (will use first decoder block's output channel count)
+            self.decoder_bea_block_idx = 0  # First decoder block
+
         self.output_blocks = nn.ModuleList([])
+        decoder_bea_ch = None  # Store first decoder block's output channels
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
@@ -331,6 +354,11 @@ class MultiBEAUNetModel(nn.Module):
                     )
                 ]
                 ch = int(model_channels * mult)
+                
+                # Store the first decoder block's output channels for BEA
+                if self.use_multi_bea and decoder_bea_ch is None:
+                    decoder_bea_ch = ch
+                    
                 if ds in attention_resolutions:
                     layers.append(
                         AttentionBlock(
@@ -360,15 +388,9 @@ class MultiBEAUNetModel(nn.Module):
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
 
-        # Add BEA to first decoder block (closest to middle)
+        # Create decoder BEA module with correct channel count
         if self.use_multi_bea:
-            self.decoder_bea_module = MultiBoundaryAwareAttention(ch, dims=dims)
-            self.decoder_bea_block_idx = 0  # First decoder block
-            
-        # Add BEA to last encoder block (closest to middle)
-        if self.use_multi_bea:
-            encoder_ch = input_block_chans[self.encoder_bea_block_idx] if input_block_chans else ch
-            self.encoder_bea_module = MultiBoundaryAwareAttention(encoder_ch, dims=dims)
+            self.decoder_bea_module = MultiBoundaryAwareAttention(decoder_bea_ch, dims=dims)
 
         self.out = nn.Sequential(
             normalization(ch, swish=1.0),
@@ -377,46 +399,69 @@ class MultiBEAUNetModel(nn.Module):
         )
         self.use_fp16 = use_fp16
 
-    def forward(self, x, timesteps, y=None, **kwargs):
+    def forward(self, x, timesteps, y=None, threshold=-1, null=False, clf_free=False, **kwargs):
         """
         Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
         :param y: an [N] Tensor of labels, if class-conditional.
+        :param threshold: a float threshold for clf-free training (portion of samples to be masked)
+                            also indicating if the model is training in clf-free mode
+        :param clf_free: a bool indicating if the model is sampled in clf-free mode
+        :param null: a bool indicating if the null embedding should be used in sampling
         :return: an [N x C x ...] Tensor of outputs.
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
 
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
+        cemb_mm = None
+        
+        #-------------------------------- Condition Setup --------------------------
         if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
+            cemb = None
+            # for clf-free training
+            if threshold != -1: 
+                assert threshold > 0
+                cemb = self.class_emb(self.label_emb(y))
+                mask = th.rand(cemb.shape[0])<threshold
+                cemb[np.where(mask)[0]] = 0
+                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb)
+            # for clf-free sampling
+            elif threshold == -1 and clf_free: 
+                if null: # null embedding
+                    cemb = th.zeros_like(emb)
+                else: # class condition embedding
+                    cemb = self.class_emb(self.label_emb(y)) 
+                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb) 
+            else:
+                raise Exception("Invalid condition setup")
+                
+            assert cemb is not None
+            assert cemb_mm is not None
+            emb = emb + cemb 
+        #-------------------------------- Condition Setup --------------------------
 
         h = x.type(self.dtype)
         x_original = x  # Store original input for BEA
         
         # Encoder blocks
         for i, module in enumerate(self.input_blocks):
-            h = module(h, emb)
+            h = module(h, emb, cemb_mm)
             # Apply BEA to the last encoder block (closest to middle)
             if self.use_multi_bea and i == self.encoder_bea_block_idx:
                 h = self.encoder_bea_module(h, x_original)
             hs.append(h)
             
         # Middle block with BEA
-        h = self.middle_block(h, emb)
+        h = self.middle_block(h, emb, cemb_mm)
         if self.use_multi_bea:
             h = self.middle_bea_module(h, x_original)
             
         # Decoder blocks
         for i, module in enumerate(self.output_blocks):
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb)
+            h = module(h, emb, cemb_mm)
             # Apply BEA to the first decoder block (closest to middle)
             if self.use_multi_bea and i == self.decoder_bea_block_idx:
                 h = self.decoder_bea_module(h, x_original)

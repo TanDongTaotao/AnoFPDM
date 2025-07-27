@@ -67,6 +67,7 @@ def model_and_diffusion_defaults():
         clf_free=True,
         use_bea=False,  # Enable/disable boundary-aware attention
         use_multi_bea=False,  # Enable/disable multi-layer boundary-aware attention
+        use_hae=False,  # Enable/disable heterogeneous autoencoder
     )
     res.update(diffusion_defaults())
     return res
@@ -108,6 +109,7 @@ def create_model_and_diffusion(
     clf_free,
     use_bea=False,
     use_multi_bea=False,
+    use_hae=False,
 ):
     model = create_model(
         image_size,
@@ -132,6 +134,7 @@ def create_model_and_diffusion(
         clf_free=clf_free,
         use_bea=use_bea,
         use_multi_bea=use_multi_bea,
+        use_hae=use_hae,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -203,6 +206,8 @@ def create_model(
         from .unet_bea import BEAUNetModel as UNetModel
     elif unet_ver == "multi_bea":
         from .unet_multi_bea import MultiBEAUNetModel as UNetModel
+    elif unet_ver == "hae":
+        from .unet_hae import HAEUNetModel as UNetModel
     else:
         raise ValueError(f"unsupported unet version: {unet_ver}")
     
@@ -228,11 +233,13 @@ def create_model(
         clf_free=clf_free,
     )
     
-    # Add BEA parameter only for BEA UNet
+    # Add specific parameters for different UNet versions
     if unet_ver == "bea":
         model_kwargs["use_bea"] = use_bea
     elif unet_ver == "multi_bea":
         model_kwargs["use_multi_bea"] = use_multi_bea
+    elif unet_ver == "hae":
+        model_kwargs["use_hae"] = use_hae
     
     return UNetModel(**model_kwargs)
 
