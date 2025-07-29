@@ -69,12 +69,12 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, encoder_out=None):
+    def forward(self, x, emb, cemb_mm=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, AttentionBlock):
-                x = layer(x, encoder_out)
+                x = layer(x, cemb_mm)
             elif isinstance(layer, HybridCNNTransformerBlock):
                 x = layer(x, emb)
             else:
@@ -249,12 +249,12 @@ class AttentionBlock(nn.Module):
             self.encoder_kv = conv_nd(1, encoder_channels, channels * 2, 1)
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
-    def forward(self, x, encoder_out=None):
+    def forward(self, x, cemb_mm=None):
         b, c, *spatial = x.shape
         qkv = self.qkv(self.norm(x).view(b, c, -1))
-        if encoder_out is not None:
-            encoder_out_expand = self.encoder_kv(encoder_out)
-            h = self.attention(qkv, encoder_out_expand)
+        if cemb_mm is not None:
+            cemb_mm_expand = self.encoder_kv(cemb_mm)
+            h = self.attention(qkv, cemb_mm_expand)
         else:
             h = self.attention(qkv)
         h = self.proj_out(h)
@@ -362,7 +362,11 @@ class MultiScaleSparseTransformerBlock(nn.Module):
         pos_embed = self.local_pos_embed.expand(B, -1)  # B, C
         # 确保x_flat的最后一个维度与pos_embed匹配
         if x_flat.size(-1) != pos_embed.size(-1):
-            x_flat = F.adaptive_avg_pool1d(x_flat.transpose(1, 2), pos_embed.size(-1)).transpose(1, 2)
+            # 使用线性层来调整维度
+            if not hasattr(self, 'local_dim_adjust'):
+                setattr(self, 'local_dim_adjust', nn.Linear(x_flat.size(-1), pos_embed.size(-1)).to(x_flat.device))
+            local_dim_adjust_layer = getattr(self, 'local_dim_adjust')
+            x_flat = local_dim_adjust_layer(x_flat)
         # 将pos_embed扩展到匹配x_flat的形状: (B, HW, C)
         seq_len = x_flat.size(1)
         pos_embed_expanded = pos_embed.unsqueeze(1).expand(B, seq_len, -1)
@@ -381,9 +385,16 @@ class MultiScaleSparseTransformerBlock(nn.Module):
                 x_patches = F.adaptive_avg_pool1d(x_patches.transpose(1, 2), C).transpose(1, 2)
                 # 确保区域位置嵌入维度匹配
                 regional_pos = self.regional_pos_embeds[i].expand(B, -1)  # B, C
+                
                 # 确保x_patches的最后一个维度与regional_pos匹配
                 if x_patches.size(-1) != regional_pos.size(-1):
-                    x_patches = F.adaptive_avg_pool1d(x_patches.transpose(1, 2), regional_pos.size(-1)).transpose(1, 2)
+                    # 使用线性层来调整维度而不是adaptive_avg_pool1d
+                    x_patches = x_patches.view(x_patches.size(0), x_patches.size(1), -1)
+                    if not hasattr(self, f'dim_adjust_{i}'):
+                        setattr(self, f'dim_adjust_{i}', nn.Linear(x_patches.size(-1), regional_pos.size(-1)).to(x_patches.device))
+                    dim_adjust_layer = getattr(self, f'dim_adjust_{i}')
+                    x_patches = dim_adjust_layer(x_patches)
+                
                 # 将regional_pos扩展到匹配x_patches的形状: (B, num_patches, C)
                 num_patches = x_patches.size(1)
                 regional_pos_expanded = regional_pos.unsqueeze(1).expand(B, num_patches, -1)

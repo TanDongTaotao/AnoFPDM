@@ -48,55 +48,47 @@ do
 
         # 设置数据目录和预训练模型目录
         data_dir="${DATA_ROOT}/BraTS21_training/preprocessed_data_all_00_128" # 假设数据在 DATA_ROOT 下
-        model_dir="${LOG_ROOT}/clf_free_guided_bottleneck_bea" # 假设模型在 LOG_ROOT 下
-        
+        model_dir="${LOG_ROOT}/logs_brats_normal_99_11_128_bottleneck_bea/logs_guided_${threshold}_all_00_${version}_128_norm"
+        image_dir="$OPENAI_LOGDIR"
+
         # 检查模型目录是否存在
         if [ ! -d "$model_dir" ]; then
-            echo "错误: 模型目录 $model_dir 不存在!"
-            echo "请确保您已经训练了模型，或者修改 model_dir 路径。"
+            echo "错误: 预训练BottleneckBEA模型目录不存在: $model_dir"
+            echo "请确保您已经训练了BottleneckBEA引导模型，或者修改 model_dir 变量指向正确的路径。"
             exit 1
         fi
-        
-        # 检查数据目录是否存在
-        if [ ! -d "$data_dir" ]; then
-            echo "错误: 数据目录 $data_dir 不存在!"
-            echo "请确保您已经预处理了数据，或者修改 data_dir 路径。"
-            exit 1
-        fi
-        
-        echo "使用数据目录: $data_dir"
-        echo "使用模型目录: $model_dir"
-        echo "使用权重 w=$w, 前向步数=$forward_steps, 模型编号=$model_num"
-        
-        # 运行推理脚本
-        python ./scripts/translation_FPDM_bottleneck_bea.py \
-            --name brats \
-            --data_dir "$data_dir" \
-            --model_dir "$model_dir" \
-            --batch_size 14 \
-            --num_batches 10 \
-            --forward_steps $forward_steps \
-            --model_num $model_num \
-            --ema False \
-            --null False \
-            --save_data False \
-            --num_batches_val 0 \
-            --batch_size_val 100 \
-            --d_reverse $d_reverse \
-            --median_filter True \
-            --dynamic_clip False \
-            --last_only False \
-            --subset_interval -1 \
-            --seed $seed \
-            --use_weighted_sampler False \
-            --use_gradient_sam False \
-            --use_gradient_para_sam False \
-            --modality 0 3 \
-            --t_e_ratio 1 \
-            --w $w
-        
-        echo "推理完成，结果保存在: $OPENAI_LOGDIR"
+
+        # 设置传递给 python 脚本的参数
+        MODEL_FLAGS="--image_size $image_size --num_classes $num_classes --in_channels $in_channels  \
+                        --w $w --attention_resolutions 32,16,8 \
+                        --num_channels $num_channels --model_num $model_num --ema True\
+                        --forward_steps $forward_steps --d_reverse $d_reverse --unet_ver $version --use_bottleneck_bea True"
+
+        DATA_FLAGS="--batch_size 10 --num_batches 1 \
+                    --batch_size_val 10 --num_batches_val 10\
+                    --modality 0 3 --use_weighted_sampler False --seed $seed"
+
+        DIFFUSION_FLAGS="--null True \
+                            --dynamic_clip False \
+                            --diffusion_steps $diffusion_steps \
+                            --noise_schedule linear \
+                            --rescale_learned_sigmas False --rescale_timesteps False"
+
+        DIR_FLAGS="--save_data False --data_dir $data_dir  --image_dir $image_dir --model_dir $model_dir"
+
+        ABLATION_FLAGS="--last_only False --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_gradient_para_sam False"
+
+        # --- [步骤 5] ---
+        # 运行BottleneckBEA UNet图像翻译脚本
+        NUM_GPUS=1 # 设置使用的 GPU 数量
+        torchrun --nproc-per-node $NUM_GPUS \
+                    --nnodes=1\
+                    --rdzv-backend=c10d\
+                    --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT\
+                ./scripts/translation_FPDM_bottleneck_bea.py --name brats $MODEL_FLAGS $DIFFUSION_FLAGS $DIR_FLAGS $DATA_FLAGS $ABLATION_FLAGS
     done
 done
+
+echo "BottleneckBEA UNet推理脚本执行完成。"
 
 echo "所有推理任务完成!"

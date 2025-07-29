@@ -1,3 +1,5 @@
+"""Synthetic domain translation from a source 2D domain to a target using Bottleneck BEA UNet."""
+
 import argparse
 import os
 import pathlib
@@ -48,164 +50,206 @@ def main():
     data_test = get_data_iter(
         args.name,
         args.data_dir,
-        mixed=False,
+        mixed=True,
         batch_size=args.batch_size,
         split="test",
-        ret_lab=True,
+        seed=args.seed,
         logger=logger,
+        use_weighted_sampler=args.use_weighted_sampler,
+        
     )
 
-    logger.log(f"obtaining hyperparameters ...")
-    hyperpara = obtain_hyperpara(
-        args,
+    model = DDP(
         model,
-        diffusion,
-        data_test,
-        args.num_batches_val,
-        args.batch_size_val,
-        args.modality,
-        args.t_e_ratio,
-        args.w,
+        device_ids=[dist_util.dev()],
+        output_device=dist_util.dev(),
+        broadcast_buffers=False,
+        bucket_cap_mb=128,
+        find_unused_parameters=False,
     )
 
-    logger.log(f"sampling ...")
-    all_images = []
-    all_labels = []
-    all_pred_maps = []
-    all_pred_masks = []
-    all_sources = []
-    all_masks = []
-    all_terms = {}
-    model_kwargs = {}
-    if args.class_cond:
-        model_kwargs["y"] = None
+    logger.log(f"Validation: starting to get threshold and abe range ...")
 
-    if dist.get_rank() == 0:
-        logger.log(f"hyperpara: {hyperpara}")
-
-    for k, batch in enumerate(data_test):
-        if k >= args.num_batches:
-            break
-        logger.log(f"batch {k}")
-        batch_size = batch[0].shape[0]
-        model_kwargs["y"] = batch[1] if args.class_cond else None
-
-        sample_fn = (
-            diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
-        )
-        sample = sample_fn(
-            model,
-            (batch_size, args.in_channels, args.image_size, args.image_size),
-            clip_denoised=args.clip_denoised,
-            model_kwargs=model_kwargs,
+    if args.num_batches_val != 0:
+        data_val = get_data_iter(
+            args.name,
+            args.data_dir,
+            mixed=True,
+            batch_size=args.batch_size_val,
+            split="val",
+            seed=args.seed,
+            logger=logger,
+            use_weighted_sampler=args.use_weighted_sampler,
         )
 
-        sample = ((sample + 1) * 127.5).clamp(0, 255).to(torch.uint8)
-        sample = sample.permute(0, 2, 3, 1)
-        sample = sample.contiguous()
+        thr_01, diff_min, diff_max, n_min = obtain_hyperpara(
+            data_val, diffusion, model, args, dist_util.dev()
+        )
+        logger.log(f"diff_min: {diff_min}, diff_max: {diff_max}, thr_01: {thr_01}, n_min: {n_min}")
+    else:
+        logger.log(f"loading hyperparameters for {args.name} with forward_steps {args.forward_steps}...")
+        if args.name == "brats":
+            # model 210000; w = 2; forward_steps = 600
+            if args.forward_steps == 999:
+                thr_01 = 0.9993147253990173
+                diff_min = torch.tensor([0.0022, 0.0010], device=dist_util.dev())
+                diff_max = torch.tensor([0.0551, 0.0388], device=dist_util.dev())
+            elif args.forward_steps == 600:
+                thr_01 = 0.9948798418045044
+                diff_min = torch.tensor([5.5484e-05, 3.4732e-05], device=dist_util.dev())
+                diff_max = torch.tensor([0.0509, 0.0397], device=dist_util.dev())
+            
+        elif args.name == "atlas":
+            # model 290000; w = 20; forward_steps = 600; unweighted
+            thr_01 = 0.7285396456718445
+            diff_min = torch.tensor([0.0392], device=dist_util.dev())
+            diff_max = torch.tensor([0.8555], device=dist_util.dev())
+            
+        logger.log(f"diff_min: {diff_min}, diff_max: {diff_max}, thr_01: {thr_01}")
 
-        gathered_samples = [torch.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
-        if args.class_cond:
-            gathered_labels = [
-                torch.zeros_like(batch[1]) for _ in range(dist.get_world_size())
-            ]
-            dist.all_gather(gathered_labels, batch[1])
-            all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
+    logger.log(f"starting to inference ...")
 
-        # get pred_map and pred_mask
-        pred_map, pred_mask_all = get_mask_batch_FPDM(
-            batch[0],
+    logging = logging_metrics(logger)
+    Y = [[] for _ in range(len(args.t_e_ratio))]
+    PRED_Y = [[] for _ in range(len(args.t_e_ratio))]
+    
+    k = 0
+    while k < args.num_batches:
+        all_sources = []
+        all_masks = []
+        all_pred_maps = []
+        all_terms = {"xstart_null": [], "xstart": []}
+        all_pred_masks_all = []
+
+        k += 1
+
+        source, mask, lab = data_test.__iter__().__next__()
+        
+        logger.log(
+            f"translating at batch {k} on rank {dist.get_rank()}, shape {source.shape}..."
+        )
+        logger.log(f"device: {torch.cuda.current_device()}")
+
+        source = source.to(dist_util.dev())
+        mask = mask.to(dist_util.dev())
+
+        logger.log(
+            f"source with mean {source.mean()} and std {source.std()} on rank {dist.get_rank()}"
+        )
+
+        y0 = torch.ones(source.shape[0], dtype=torch.long) * torch.arange(
+            start=0, end=1
+        ).reshape(
+            -1, 1
+        )  # 0 for healthy
+        y0 = y0.reshape(-1, 1).squeeze().to(dist_util.dev())
+
+        model_kwargs_reverse = {"threshold": -1, "clf_free": True, "null": args.null}
+        model_kwargs0 = {"y": y0, "threshold": -1, "clf_free": True}
+
+        # inference
+
+        # obtain xstart and xstart_null
+        xstarts = diffusion.calc_pred_xstart_loop(
             model,
-            diffusion,
-            hyperpara,
-            args.modality,
-            args.t_e_ratio,
+            source,
             args.w,
-            args.median_filter,
-            args.dynamic_clip,
-            args.last_only,
+            modality=args.modality,
+            d_reverse=args.d_reverse,
+            sample_steps=args.forward_steps,
+            model_kwargs=model_kwargs0,
+            model_kwargs_reverse=model_kwargs_reverse,
+            dynamic_clip=args.dynamic_clip,
         )
 
-        gathered_pred_maps = [
-            torch.zeros_like(pred_map) for _ in range(dist.get_world_size())
-        ]
-        dist.all_gather(gathered_pred_maps, pred_map)
-        all_pred_maps.extend([pred_map.cpu().numpy() for pred_map in gathered_pred_maps])
+        # collect metrics
+        pred_map = None
+        pred_mask_all = None
+        for n, ratio in enumerate(args.t_e_ratio):
+            pred_mask, pred_mask_all, pred_lab, pred_map, _ = get_mask_batch_FPDM(
+                xstarts,
+                source,
+                args.modality,
+                thr_01,
+                diff_min,
+                diff_max,
+                args.image_size,
+                median_filter=args.median_filter,
+                device=dist_util.dev(),
+                t_e_ratio=ratio,
+                last_only=args.last_only,
+                interval=args.subset_interval,
+                use_gradient_sam=args.use_gradient_sam,
+                use_gradient_para_sam=args.use_gradient_para_sam,
+                forward_steps=args.forward_steps,
+                diffusion_steps=args.diffusion_steps,
+                w=args.w,
+            )
 
-        gathered_pred_masks = [
-            torch.zeros_like(pred_mask_all) for _ in range(dist.get_world_size())
-        ]
-        dist.all_gather(gathered_pred_masks, pred_mask_all)
-        all_pred_masks.extend(
-            [pred_mask.cpu().numpy() for pred_mask in gathered_pred_masks]
-        )
+            Y[n].append(lab)
+            PRED_Y[n].append(pred_lab)
+            eval_metrics = evaluate(mask, pred_mask, source, pred_map)
+            eval_metrics_ano = evaluate(mask, pred_mask_all, source, pred_map, lab)
+            cls_metrics = get_stats(Y[n], PRED_Y[n])
+            logger.log(f"ratio: {ratio}")
+            logging.logging(eval_metrics, eval_metrics_ano, cls_metrics, k)
+            
+            if args.save_data:
+                logger.log("collecting metrics...")
+                for key in all_terms.keys():
+                    gathered_terms = [
+                        torch.zeros_like(xstarts[key]) for _ in range(dist.get_world_size())
+                    ]
+                    dist.all_gather(gathered_terms, xstarts[key])
+                    all_terms[key].extend(
+                        [term.cpu().numpy() for term in gathered_terms]
+                    )
 
-        gathered_sources = [
-            torch.zeros_like(batch[0]) for _ in range(dist.get_world_size())
-        ]
-        dist.all_gather(gathered_sources, batch[0])
-        all_sources.extend([source.cpu().numpy() for source in gathered_sources])
+                gathered_source = [
+                    torch.zeros_like(source) for _ in range(dist.get_world_size())
+                ]
+                gathered_mask = [
+                    torch.zeros_like(mask) for _ in range(dist.get_world_size())
+                ]
+                gathered_pred_map = [
+                    torch.zeros_like(pred_map) for _ in range(dist.get_world_size())
+                ]
+                gathered_pred_masks_all = [
+                    torch.zeros_like(pred_mask_all)
+                    for _ in range(dist.get_world_size())
+                ]
+                
+                dist.all_gather(gathered_source, source)
+                dist.all_gather(gathered_mask, mask)
+                dist.all_gather(gathered_pred_map, pred_map)
+                dist.all_gather(gathered_pred_masks_all, pred_mask_all)
 
-        gathered_masks = [
-            torch.zeros_like(batch[2]) for _ in range(dist.get_world_size())
-        ]
-        dist.all_gather(gathered_masks, batch[2])
-        all_masks.extend([mask.cpu().numpy() for mask in gathered_masks])
+                all_sources.extend([source.cpu().numpy() for source in gathered_source])
+                all_masks.extend([mask.cpu().numpy() for mask in gathered_mask])
+                all_pred_maps.extend(
+                    [pred_map.cpu().numpy() for pred_map in gathered_pred_map]
+                )
+                all_pred_masks_all.extend(
+                    [pred_mask_all.cpu().numpy() for pred_mask_all in gathered_pred_masks_all]
+                )
 
-    arr = np.concatenate(all_images, axis=0)
-    arr = arr[: args.num_samples]
-    if args.class_cond:
-        label_arr = np.concatenate(all_labels, axis=0)
-        label_arr = label_arr[: args.num_samples]
-    if dist.get_rank() == 0:
-        shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
-        logger.log(f"saving to {out_path}")
-        if args.class_cond:
-            np.savez(out_path, arr, label_arr)
-        else:
-            np.savez(out_path, arr)
+                all_sources = np.concatenate(all_sources, axis=0)
+                all_sources_path = os.path.join(image_subfolder, f"source_{k}.npy")
+                np.save(all_sources_path, all_sources)
 
-    # save pred_map and pred_mask
-    pred_map_arr = np.concatenate(all_pred_maps, axis=0)
-    pred_map_arr = pred_map_arr[: args.num_samples]
-    pred_mask_arr = np.concatenate(all_pred_masks, axis=0)
-    pred_mask_arr = pred_mask_arr[: args.num_samples]
-    source_arr = np.concatenate(all_sources, axis=0)
-    source_arr = source_arr[: args.num_samples]
-    mask_arr = np.concatenate(all_masks, axis=0)
-    mask_arr = mask_arr[: args.num_samples]
+                all_masks = np.concatenate(all_masks, axis=0)
+                all_masks_path = os.path.join(image_subfolder, f"mask_{k}.npy")
+                np.save(all_masks_path, all_masks)
 
-    if dist.get_rank() == 0:
-        if args.save_data:
-            source_path = os.path.join(logger.get_dir(), f"source.npy")
-            logger.log(f"saving to {source_path}")
-            np.save(source_path, source_arr)
+                all_pred_maps = np.concatenate(all_pred_maps, axis=0)
+                all_pred_maps_path = os.path.join(image_subfolder, f"pred_map_{k}.npy")
+                np.save(all_pred_maps_path, all_pred_maps)
+                
+                all_pred_masks_all = np.concatenate(all_pred_masks_all, axis=0)
+                all_pred_masks_all_path = os.path.join(image_subfolder, f"pred_mask_all_{k}.npy")
+                np.save(all_pred_masks_all_path, all_pred_masks_all)
 
-            mask_path = os.path.join(logger.get_dir(), f"mask.npy")
-            logger.log(f"saving to {mask_path}")
-            np.save(mask_path, mask_arr)
-
-            pred_map_path = os.path.join(logger.get_dir(), f"pred_map.npy")
-            logger.log(f"saving to {pred_map_path}")
-            np.save(pred_map_path, pred_map_arr)
-
-            pred_mask_path = os.path.join(logger.get_dir(), f"pred_mask_all.npy")
-            logger.log(f"saving to {pred_mask_path}")
-            np.save(pred_mask_path, pred_mask_arr)
-
-        # evaluation
-        logger.log(f"evaluation ...")
-        stats = get_stats(pred_mask_arr, mask_arr, args.multi_class)
-        evaluate(stats, logger)
-        logging_metrics(stats, logger)
-
-        if len(all_terms) > 0:
-            for key in all_terms.keys():
-                for k in range(len(all_terms[key])):
+                for key in all_terms.keys():
                     all_terms_path = os.path.join(
                         logger.get_dir(), f"{key}_terms_{k}.npy"
                     )
@@ -256,7 +300,6 @@ def create_argparser():
         "--t_e_ratio",
         type=float,
         nargs="+",
-        help="ratio of t_e",
         default=[1],
     )
     parser.add_argument(

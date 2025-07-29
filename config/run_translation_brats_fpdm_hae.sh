@@ -40,58 +40,52 @@ for round in 1
 do
     for w in 2  # 为 brats 数据集选择 w=2; 可在此处修改以进行消融研究
     do
-        # 设置日志输出目录
-        export OPENAI_LOGDIR="$LOG_ROOT/clf_free_guided_hae"
-        
-        # 设置模型目录
-        model_dir="$OPENAI_LOGDIR"
-        
-        # 设置结果输出目录
-        image_dir="$OPENAI_LOGDIR/results_hae_w${w}_fs${forward_steps}_r${round}"
-        
-        # 数据标志
-        DATA_FLAGS="--data_dir $DATA_ROOT --image_size $image_size --num_classes $num_classes --class_cond True --ret_lab True --mixed True"
-        
-        # 模型标志
-        MODEL_FLAGS="--unet_ver $version --clf_free True --use_hae True \
-                     --in_channels $in_channels \
-                     --num_channels $num_channels \
-                     --attention_resolutions 32,16,8 \
-                     --learn_sigma False \
-                     --dropout 0.1"
-        
-        # 扩散标志
-        DIFFUSION_FLAGS="--diffusion_steps $diffusion_steps \
-                         --noise_schedule linear \
-                         --rescale_learned_sigmas False \
-                         --rescale_timesteps False"
-        
-        # 推理标志
-        INFERENCE_FLAGS="--model_dir $model_dir \
-                         --model_num $model_num \
-                         --image_dir $image_dir \
-                         --w $w \
-                         --forward_steps $forward_steps \
-                         --d_reverse $d_reverse \
-                         --seed $seed \
-                         --batch_size 1 \
-                         --num_batches 10 \
-                         --modality FLAIR \
-                         --median_filter True \
-                         --t_e_ratio 0.5 \
-                         --ema True"
-        
-        echo "开始 HAE UNet 推理，轮次: $round, w: $w"
-        echo "模型目录: $model_dir"
-        echo "结果目录: $image_dir"
-        
-        # 运行推理
-        python ./scripts/translation_FPDM_hae.py --name brats \
-                                                  $DATA_FLAGS $MODEL_FLAGS $DIFFUSION_FLAGS $INFERENCE_FLAGS
-        
-        echo "HAE UNet 推理完成，轮次: $round, w: $w"
-        echo "结果已保存到: $image_dir"
-        echo "-----------------------------------"
+tuilijiaobe        # 设置日志输出目录
+        export OPENAI_LOGDIR="${LOG_ROOT}/logs_brats_aba_hae/translation_fpdm_hae_${w}_${model_num}_${forward_steps}_${round}_x1"
+        # 确保目录存在
+        mkdir -p $OPENAI_LOGDIR
+        echo "日志将保存在: $OPENAI_LOGDIR"
+
+        # 设置数据目录和预训练模型目录
+        data_dir="${DATA_ROOT}/BraTS21_training/preprocessed_data_all_00_128" # 假设数据在 DATA_ROOT 下
+        model_dir="${LOG_ROOT}/logs_brats_normal_99_11_128_hae/logs_guided_${threshold}_all_00_${version}_128_norm"
+        image_dir="$OPENAI_LOGDIR"
+
+        # 检查模型目录是否存在
+        if [ ! -d "$model_dir" ]; then
+            echo "错误: 预训练HAE模型目录不存在: $model_dir"
+            echo "请确保您已经训练了HAE引导模型，或者修改 model_dir 变量指向正确的路径。"
+            exit 1
+        fi
+
+        # 设置传递给 python 脚本的参数
+        MODEL_FLAGS="--image_size $image_size --num_classes $num_classes --in_channels $in_channels  \
+                        --w $w --attention_resolutions 32,16,8 \
+                        --num_channels $num_channels --model_num $model_num --ema True\
+                        --forward_steps $forward_steps --d_reverse $d_reverse --unet_ver $version --use_hae True"
+
+        DATA_FLAGS="--batch_size 10 --num_batches 1 \
+                    --batch_size_val 10 --num_batches_val 10\
+                    --modality 0 3 --use_weighted_sampler False --seed $seed"
+
+        DIFFUSION_FLAGS="--null True \
+                            --dynamic_clip False \
+                            --diffusion_steps $diffusion_steps \
+                            --noise_schedule linear \
+                            --rescale_learned_sigmas False --rescale_timesteps False"
+
+        DIR_FLAGS="--save_data False --data_dir $data_dir  --image_dir $image_dir --model_dir $model_dir"
+
+        ABLATION_FLAGS="--last_only False --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_gradient_para_sam False"
+
+        # --- [步骤 5] ---
+        # 运行HAE UNet图像翻译脚本
+        NUM_GPUS=1 # 设置使用的 GPU 数量
+        torchrun --nproc-per-node $NUM_GPUS \
+                    --nnodes=1\
+                    --rdzv-backend=c10d\
+                    --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT\
+                ./scripts/translation_FPDM_hae.py --name brats $MODEL_FLAGS $DIFFUSION_FLAGS $DIR_FLAGS $DATA_FLAGS $ABLATION_FLAGS
     done
 done
 

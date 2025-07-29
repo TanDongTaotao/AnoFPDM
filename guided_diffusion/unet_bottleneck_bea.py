@@ -1,4 +1,5 @@
 import math
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -506,6 +507,7 @@ class BottleneckBEAUNetModel(nn.Module):
         disable_middle_self_attn=False,
         use_linear_in_transformer=False,
         use_bottleneck_bea=False,
+        clf_free=True,
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -543,6 +545,7 @@ class BottleneckBEAUNetModel(nn.Module):
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
         self.use_bottleneck_bea = use_bottleneck_bea
+        self.clf_free = clf_free
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -551,7 +554,14 @@ class BottleneckBEAUNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
 
-        if self.num_classes is not None:
+        if self.num_classes is not None and clf_free:
+            self.label_emb = nn.Embedding(self.num_classes, model_channels)
+            self.class_emb = nn.Sequential(
+                linear(model_channels, time_embed_dim),
+                nn.SiLU(),
+                linear(time_embed_dim, time_embed_dim),
+            )
+        elif self.num_classes is not None and not clf_free:
             if isinstance(self.num_classes, int):
                 self.label_emb = nn.Embedding(num_classes, time_embed_dim)
             elif self.num_classes == "continuous":
@@ -822,25 +832,51 @@ class BottleneckBEAUNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps=None, context=None, y=None,**kwargs):
+    def forward(self, x, timesteps=None, context=None, y=None, threshold=-1, null=False, clf_free=False, **kwargs):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
         :param context: conditioning plugged in via crossattn
         :param y: an [N] Tensor of labels, if class-conditional.
+        :param threshold: a float threshold for clf-free training (portion of samples to be masked)
+                            also indicating if the model is training in clf-free mode
+        :param clf_free: a bool indicating if the model is sampled in clf-free mode
+        :param null: a bool indicating if the null embedding should be used in sampling
         :return: an [N x C x ...] Tensor of outputs.
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
         hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-        emb = self.time_embed(t_emb)
-
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        
+        #-------------------------------- Condition Setup --------------------------
+        '''
+        For clf-free training, set threshold > 0
+        For clf-free sampling, set threshold = -1, and clf_free = True
+        For clf training, set threshold = -1, and clf_free = False
+        '''
         if self.num_classes is not None:
-            assert y.shape[0] == x.shape[0]
-            emb = emb + self.label_emb(y)
+            cemb = None
+            # for clf-free training
+            if threshold != -1: 
+                assert threshold > 0
+                cemb = self.class_emb(self.label_emb(y))
+                mask = torch.rand(cemb.shape[0])<threshold
+                cemb[torch.where(mask)[0]] = 0
+            # for clf-free sampling
+            elif threshold == -1 and clf_free: 
+                if null: # null embedding
+                    cemb = torch.zeros_like(emb)
+                else: # class condition embedding
+                    cemb = self.class_emb(self.label_emb(y)) 
+            # for non-clf-free condition embedding, e.g., classifier guided sampling
+            elif threshold == -1 and not clf_free:
+                cemb = self.label_emb(y)
+            else:
+                raise Exception("Invalid condition setup")
+                
+            assert cemb is not None
+            emb = emb + cemb 
+        #-------------------------------- Condition Setup --------------------------
 
         # Store original input for BEA
         x_original = x.clone() if self.use_bottleneck_bea else None

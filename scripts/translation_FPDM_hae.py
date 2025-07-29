@@ -163,6 +163,8 @@ def main():
         )
 
         # collect metrics
+        pred_map = None
+        pred_mask_all = None
         for n, ratio in enumerate(args.t_e_ratio):
             pred_mask, pred_mask_all, pred_lab, pred_map, _ = get_mask_batch_FPDM(
                 xstarts,
@@ -183,7 +185,7 @@ def main():
                 diffusion_steps=args.diffusion_steps,
                 w=args.w,
             )
-            
+
             Y[n].append(lab)
             PRED_Y[n].append(pred_lab)
             eval_metrics = evaluate(mask, pred_mask, source, pred_map)
@@ -199,122 +201,123 @@ def main():
                         torch.zeros_like(xstarts[key]) for _ in range(dist.get_world_size())
                     ]
                     dist.all_gather(gathered_terms, xstarts[key])
-                    all_terms[key].append(torch.cat(gathered_terms, dim=0))
+                    all_terms[key].extend(
+                        [term.cpu().numpy() for term in gathered_terms]
+                    )
 
-                gathered_sources = [
+                gathered_source = [
                     torch.zeros_like(source) for _ in range(dist.get_world_size())
                 ]
-                dist.all_gather(gathered_sources, source)
-                all_sources.append(torch.cat(gathered_sources, dim=0))
-
-                gathered_masks = [
+                gathered_mask = [
                     torch.zeros_like(mask) for _ in range(dist.get_world_size())
                 ]
-                dist.all_gather(gathered_masks, mask)
-                all_masks.append(torch.cat(gathered_masks, dim=0))
-
-                gathered_pred_maps = [
+                gathered_pred_map = [
                     torch.zeros_like(pred_map) for _ in range(dist.get_world_size())
                 ]
-                dist.all_gather(gathered_pred_maps, pred_map)
-                all_pred_maps.append(torch.cat(gathered_pred_maps, dim=0))
-
                 gathered_pred_masks_all = [
-                    torch.zeros_like(pred_mask_all) for _ in range(dist.get_world_size())
+                    torch.zeros_like(pred_mask_all)
+                    for _ in range(dist.get_world_size())
                 ]
+                
+                dist.all_gather(gathered_source, source)
+                dist.all_gather(gathered_mask, mask)
+                dist.all_gather(gathered_pred_map, pred_map)
                 dist.all_gather(gathered_pred_masks_all, pred_mask_all)
-                all_pred_masks_all.append(torch.cat(gathered_pred_masks_all, dim=0))
 
-        if args.save_data:
-            logger.log("saving data...")
-            if dist.get_rank() == 0:
+                all_sources.extend([source.cpu().numpy() for source in gathered_source])
+                all_masks.extend([mask.cpu().numpy() for mask in gathered_mask])
+                all_pred_maps.extend(
+                    [pred_map.cpu().numpy() for pred_map in gathered_pred_map]
+                )
+                all_pred_masks_all.extend(
+                    [pred_mask_all.cpu().numpy() for pred_mask_all in gathered_pred_masks_all]
+                )
+
+                all_sources = np.concatenate(all_sources, axis=0)
+                all_sources_path = os.path.join(image_subfolder, f"source_{k}.npy")
+                np.save(all_sources_path, all_sources)
+
+                all_masks = np.concatenate(all_masks, axis=0)
+                all_masks_path = os.path.join(image_subfolder, f"mask_{k}.npy")
+                np.save(all_masks_path, all_masks)
+
+                all_pred_maps = np.concatenate(all_pred_maps, axis=0)
+                all_pred_maps_path = os.path.join(image_subfolder, f"pred_map_{k}.npy")
+                np.save(all_pred_maps_path, all_pred_maps)
+                
+                all_pred_masks_all = np.concatenate(all_pred_masks_all, axis=0)
+                all_pred_masks_all_path = os.path.join(image_subfolder, f"pred_mask_all_{k}.npy")
+                np.save(all_pred_masks_all_path, all_pred_masks_all)
+
                 for key in all_terms.keys():
-                    arr = torch.cat(all_terms[key], dim=0).cpu().numpy()
-                    shape_str = "x".join([str(x) for x in arr.shape])
-                    out_path = os.path.join(
-                        image_subfolder, f"{key}_{shape_str}_{k}.npz"
+                    all_terms_path = os.path.join(
+                        logger.get_dir(), f"{key}_terms_{k}.npy"
                     )
-                    logger.log(f"saving to {out_path}")
-                    np.savez(out_path, arr)
-
-                arr = torch.cat(all_sources, dim=0).cpu().numpy()
-                shape_str = "x".join([str(x) for x in arr.shape])
-                out_path = os.path.join(
-                    image_subfolder, f"source_{shape_str}_{k}.npz"
-                )
-                logger.log(f"saving to {out_path}")
-                np.savez(out_path, arr)
-
-                arr = torch.cat(all_masks, dim=0).cpu().numpy()
-                shape_str = "x".join([str(x) for x in arr.shape])
-                out_path = os.path.join(
-                    image_subfolder, f"mask_{shape_str}_{k}.npz"
-                )
-                logger.log(f"saving to {out_path}")
-                np.savez(out_path, arr)
-
-                arr = torch.cat(all_pred_maps, dim=0).cpu().numpy()
-                shape_str = "x".join([str(x) for x in arr.shape])
-                out_path = os.path.join(
-                    image_subfolder, f"pred_map_{shape_str}_{k}.npz"
-                )
-                logger.log(f"saving to {out_path}")
-                np.savez(out_path, arr)
-
-                arr = torch.cat(all_pred_masks_all, dim=0).cpu().numpy()
-                shape_str = "x".join([str(x) for x in arr.shape])
-                out_path = os.path.join(
-                    image_subfolder, f"pred_mask_all_{shape_str}_{k}.npz"
-                )
-                logger.log(f"saving to {out_path}")
-                np.savez(out_path, arr)
+                    np.save(all_terms_path, all_terms[key])
 
     dist.barrier()
-    logger.log("translation complete")
+
+    logger.log(f"evaluation complete")
 
 
 def create_argparser():
     defaults = dict(
+        name="",
         data_dir="",
-        name="brats",
-        schedule_sampler="uniform",
-        lr=1e-4,
-        weight_decay=0.0,
-        lr_anneal_steps=0,
-        batch_size=1,
-        batch_size_val=1,
-        microbatch=-1,
-        ema_rate="0.9999",
-        log_interval=10,
-        save_interval=10000,
-        resume_checkpoint="",
-        use_fp16=False,
-        fp16_scale_growth=1e-3,
-        seed=0,
+        image_dir="",
         model_dir="",
-        model_num=210000,
-        ema=True,
-        w=2,
-        modality="FLAIR",
-        d_reverse=True,
+        batch_size=32,
         forward_steps=600,
-        dynamic_clip=False,
-        image_dir="./results",
-        num_batches=1,
-        num_batches_val=0,
+        model_num=None,
+        ema=False,
+        null=False,
+        save_data=False,
+        num_batches_val=2,
+        batch_size_val=100,
+        d_reverse=True, # deterministic encoding or not
         median_filter=True,
-        t_e_ratio=[0.5],
+        dynamic_clip=False, 
         last_only=False,
-        subset_interval=1,
+        subset_interval=-1,
+        seed=0,  # reproduce
+        use_weighted_sampler=False,
         use_gradient_sam=False,
         use_gradient_para_sam=False,
-        save_data=False,
-        null=False,
-        use_weighted_sampler=False,
+        unet_ver="hae",  # Force HAE UNet
         use_hae=True,  # Enable HAE by default
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--modality",
+        type=int,
+        nargs="+",
+        help="0:flair, 1:t1, 2:t1ce, 3:t2",
+        default=[0, 3],  # flair as default
+    )
+    parser.add_argument(
+        "--t_e_ratio",
+        type=float,
+        nargs="+",
+        default=[1],
+    )
+    parser.add_argument(
+        "--w",
+        type=float,
+        help="weight for clf-free samples",
+        default=-1,  # disabled in default
+    )
+
+    parser.add_argument(
+        "--num_batches",
+        type=int,
+        help="weight for clf-free samples",
+        default=1,  # disabled in default
+    )
+    
+
+
     add_dict_to_argparser(parser, defaults)
     return parser
 
