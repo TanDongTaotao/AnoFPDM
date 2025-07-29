@@ -67,6 +67,7 @@ def model_and_diffusion_defaults():
         clf_free=True,
         use_bea=False,  # Enable/disable boundary-aware attention
         use_multi_bea=False,  # Enable/disable multi-layer boundary-aware attention
+        use_bottleneck_bea=False,  # Enable/disable bottleneck-only boundary-aware attention
         use_hae=False,  # Enable/disable heterogeneous autoencoder
     )
     res.update(diffusion_defaults())
@@ -109,6 +110,7 @@ def create_model_and_diffusion(
     clf_free,
     use_bea=False,
     use_multi_bea=False,
+    use_bottleneck_bea=False,
     use_hae=False,
 ):
     model = create_model(
@@ -134,6 +136,7 @@ def create_model_and_diffusion(
         clf_free=clf_free,
         use_bea=use_bea,
         use_multi_bea=use_multi_bea,
+        use_bottleneck_bea=use_bottleneck_bea,
         use_hae=use_hae,
     )
     diffusion = create_gaussian_diffusion(
@@ -172,6 +175,7 @@ def create_model(
     clf_free=True,
     use_bea=False,
     use_multi_bea=False,
+    use_bottleneck_bea=False,
     use_hae=False,
 ):
     if channel_mult == "":
@@ -207,6 +211,8 @@ def create_model(
         from .unet_bea import BEAUNetModel as UNetModel
     elif unet_ver == "multi_bea":
         from .unet_multi_bea import MultiBEAUNetModel as UNetModel
+    elif unet_ver == "bottleneck_bea":
+        from .unet_bottleneck_bea import BottleneckBEAUNetModel as UNetModel
     elif unet_ver == "hae":
         from .unet_hae import HAEUNetModel as UNetModel
     else:
@@ -239,6 +245,8 @@ def create_model(
         model_kwargs["use_bea"] = use_bea
     elif unet_ver == "multi_bea":
         model_kwargs["use_multi_bea"] = use_multi_bea
+    elif unet_ver == "bottleneck_bea":
+        model_kwargs["use_bottleneck_bea"] = use_bottleneck_bea
     elif unet_ver == "hae":
         model_kwargs["use_hae"] = use_hae
     

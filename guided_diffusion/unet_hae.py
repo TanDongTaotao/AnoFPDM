@@ -360,7 +360,13 @@ class MultiScaleSparseTransformerBlock(nn.Module):
         x_flat = x.view(B, C, -1).transpose(1, 2)  # B, HW, C
         # 确保位置嵌入维度匹配
         pos_embed = self.local_pos_embed.expand(B, -1)  # B, C
-        local_features = self.local_norm(x_flat + pos_embed.unsqueeze(1))  # B, HW, C
+        # 确保x_flat的最后一个维度与pos_embed匹配
+        if x_flat.size(-1) != pos_embed.size(-1):
+            x_flat = F.adaptive_avg_pool1d(x_flat.transpose(1, 2), pos_embed.size(-1)).transpose(1, 2)
+        # 将pos_embed扩展到匹配x_flat的形状: (B, HW, C)
+        seq_len = x_flat.size(1)
+        pos_embed_expanded = pos_embed.unsqueeze(1).expand(B, seq_len, -1)
+        local_features = self.local_norm(x_flat + pos_embed_expanded)  # B, HW, C
         
         # 区域信息：多尺度块划分
         regional_features = []
@@ -375,7 +381,13 @@ class MultiScaleSparseTransformerBlock(nn.Module):
                 x_patches = F.adaptive_avg_pool1d(x_patches.transpose(1, 2), C).transpose(1, 2)
                 # 确保区域位置嵌入维度匹配
                 regional_pos = self.regional_pos_embeds[i].expand(B, -1)  # B, C
-                x_patches = self.regional_norms[i](x_patches + regional_pos.unsqueeze(1))
+                # 确保x_patches的最后一个维度与regional_pos匹配
+                if x_patches.size(-1) != regional_pos.size(-1):
+                    x_patches = F.adaptive_avg_pool1d(x_patches.transpose(1, 2), regional_pos.size(-1)).transpose(1, 2)
+                # 将regional_pos扩展到匹配x_patches的形状: (B, num_patches, C)
+                num_patches = x_patches.size(1)
+                regional_pos_expanded = regional_pos.unsqueeze(1).expand(B, num_patches, -1)
+                x_patches = self.regional_norms[i](x_patches + regional_pos_expanded)
                 regional_features.append(x_patches)
         
         # 合并所有特征
