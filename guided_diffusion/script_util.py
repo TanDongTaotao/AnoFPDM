@@ -209,6 +209,8 @@ def create_model(
         from .unet_v1 import UNetModel
     elif unet_ver == "bea":
         from .unet_bea import BEAUNetModel as UNetModel
+    elif unet_ver == "bea_dual_loss":
+        from .unet_bea_dual_loss import BEADualLossUNetModel as UNetModel
     elif unet_ver == "multi_bea":
         from .unet_multi_bea import MultiBEAUNetModel as UNetModel
     elif unet_ver == "bottleneck_bea":
@@ -242,6 +244,8 @@ def create_model(
     
     # Add specific parameters for different UNet versions
     if unet_ver == "bea":
+        model_kwargs["use_bea"] = use_bea
+    elif unet_ver == "bea_dual_loss":
         model_kwargs["use_bea"] = use_bea
     elif unet_ver == "multi_bea":
         model_kwargs["use_multi_bea"] = use_multi_bea
