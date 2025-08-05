@@ -30,7 +30,7 @@ forward_steps=600
 diffusion_steps=1000
 model_num=210000
 version=bea_dual_loss  # Use BEA dual loss UNet version
-boundary_loss_weight=0.3  # λ parameter for boundary-aware consistency loss
+boundary_loss_weight=0.1  # λ parameter for boundary-aware consistency loss
 
 d_reverse=True # 设置为 True 使用 ddim reverse (确定性编码)
                # 否则将使用 ddpm reverse (随机编码)

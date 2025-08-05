@@ -69,6 +69,7 @@ def model_and_diffusion_defaults():
         use_multi_bea=False,  # Enable/disable multi-layer boundary-aware attention
         use_bottleneck_bea=False,  # Enable/disable bottleneck-only boundary-aware attention
         use_hae=False,  # Enable/disable heterogeneous autoencoder
+        boundary_loss_weight=0.1,  # Weight for boundary-aware consistency loss (λ parameter)
     )
     res.update(diffusion_defaults())
     return res
@@ -112,6 +113,7 @@ def create_model_and_diffusion(
     use_multi_bea=False,
     use_bottleneck_bea=False,
     use_hae=False,
+    boundary_loss_weight=0.1,
 ):
     model = create_model(
         image_size,
@@ -139,16 +141,52 @@ def create_model_and_diffusion(
         use_bottleneck_bea=use_bottleneck_bea,
         use_hae=use_hae,
     )
-    diffusion = create_gaussian_diffusion(
-        steps=diffusion_steps,
-        learn_sigma=learn_sigma,
-        noise_schedule=noise_schedule,
-        use_kl=use_kl,
-        predict_xstart=predict_xstart,
-        rescale_timesteps=rescale_timesteps,
-        rescale_learned_sigmas=rescale_learned_sigmas,
-        timestep_respacing=timestep_respacing,
-    )
+    
+    # Use dual loss diffusion for bea_dual_loss UNet version
+    if unet_ver == "bea_dual_loss":
+        from .gaussian_diffusion_dual_loss import (
+            GaussianDiffusionDualLoss,
+            ModelMeanType,
+            ModelVarType,
+            LossType,
+            get_named_beta_schedule,
+        )
+        
+        betas = get_named_beta_schedule(noise_schedule, diffusion_steps)
+        if use_kl:
+            loss_type = LossType.RESCALED_KL
+        elif rescale_learned_sigmas:
+            loss_type = LossType.RESCALED_MSE
+        else:
+            loss_type = LossType.DUAL_LOSS  # Use dual loss
+        if not timestep_respacing:
+            timestep_respacing = [diffusion_steps]
+        
+        diffusion = GaussianDiffusionDualLoss(
+            betas=betas,
+            model_mean_type=(
+                ModelMeanType.EPSILON if not predict_xstart else ModelMeanType.START_X
+            ),
+            model_var_type=(
+                (ModelVarType.FIXED_LARGE if not learn_sigma else ModelVarType.LEARNED_RANGE)
+                if not rescale_learned_sigmas
+                else ModelVarType.LEARNED
+            ),
+            loss_type=loss_type,
+            rescale_timesteps=rescale_timesteps,
+            boundary_loss_weight=boundary_loss_weight,
+        )
+    else:
+        diffusion = create_gaussian_diffusion(
+            steps=diffusion_steps,
+            learn_sigma=learn_sigma,
+            noise_schedule=noise_schedule,
+            use_kl=use_kl,
+            predict_xstart=predict_xstart,
+            rescale_timesteps=rescale_timesteps,
+            rescale_learned_sigmas=rescale_learned_sigmas,
+            timestep_respacing=timestep_respacing,
+        )
     return model, diffusion
 
 
@@ -247,6 +285,7 @@ def create_model(
         model_kwargs["use_bea"] = use_bea
     elif unet_ver == "bea_dual_loss":
         model_kwargs["use_bea"] = use_bea
+        model_kwargs["return_features"] = True  # Enable feature return for dual loss
     elif unet_ver == "multi_bea":
         model_kwargs["use_multi_bea"] = use_multi_bea
     elif unet_ver == "bottleneck_bea":

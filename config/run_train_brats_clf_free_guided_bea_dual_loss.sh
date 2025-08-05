@@ -16,7 +16,7 @@ num_classes=2
 image_size=128
 threshold=0.1
 version=bea_dual_loss  # Use BEA dual loss UNet version
-boundary_loss_weight=0.3  # λ parameter for boundary-aware consistency loss
+boundary_loss_weight=0.1  # λ parameter for boundary-aware consistency loss
 
 # log dir
 export OPENAI_LOGDIR="./logs/clf_free_guided_bea_dual_loss"

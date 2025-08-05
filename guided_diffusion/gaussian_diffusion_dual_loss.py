@@ -13,26 +13,24 @@ import functools
 
 def clamp_to_spatial_quantile(x: th.Tensor, **kwargs):
     """
-    Clamp the values of a tensor to a spatial quantile.
-    
-    :param x: the tensor to clamp.
-    :param kwargs: additional arguments for torch.quantile.
-    :return: the clamped tensor.
+    将输入张量按空间维度进行裁剪并归一化，使其值被限制在空间维度绝对值的特定分位数范围内。
+
+    参数:
+    x (th.Tensor): 输入的 PyTorch 张量，形状通常为 [batch_size, channels, *spatial_dims]。
+    **kwargs: 预留的关键字参数，当前函数未使用。
+
+    返回:
+    th.Tensor: 裁剪并归一化后的张量，形状与输入张量 x 相同。
     """
-    # Flatten spatial dimensions
-    spatial_dims = list(range(2, x.ndim))
-    x_flat = x.flatten(start_dim=2)
-    
-    # Compute quantiles along spatial dimension
-    q_low = th.quantile(x_flat, 0.01, dim=-1, keepdim=True, **kwargs)
-    q_high = th.quantile(x_flat, 0.99, dim=-1, keepdim=True, **kwargs)
-    
-    # Reshape back to original spatial shape
-    for _ in spatial_dims:
-        q_low = q_low.unsqueeze(-1)
-        q_high = q_high.unsqueeze(-1)
-    
-    return th.clamp(x, q_low, q_high)
+    p = 0.99
+    b, c, *spatial = x.shape
+    quantile = th.quantile(th.abs(x).view(b, c, -1), p, dim=-1, keepdim=True)
+    quantile = th.max(quantile, th.ones_like(quantile))
+    quantile_broadcasted, _ = th.broadcast_tensors(quantile.unsqueeze(-1), x)
+    return (
+        th.min(th.max(x, -quantile_broadcasted), quantile_broadcasted)
+        / quantile_broadcasted
+    )
 
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
@@ -144,7 +142,7 @@ class GaussianDiffusionDualLoss:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
-        boundary_loss_weight=0.3,  # λ parameter for boundary-aware consistency loss
+        boundary_loss_weight=0.1,  # λ parameter for boundary-aware consistency loss
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -287,8 +285,10 @@ class GaussianDiffusionDualLoss:
         B, C = x.shape[:2]
         assert t.shape == (B,)
         
-        # Check if model returns features for dual loss
-        model_output = model(x, self._scale_timesteps(t), **model_kwargs)
+        if clf_free is not None:
+            model_output = clf_free(x=x, t=self._scale_timesteps(t))
+        else:
+            model_output = model(x, self._scale_timesteps(t), **model_kwargs)
         
         # Handle dual loss model output
         if isinstance(model_output, tuple) and len(model_output) == 3:
@@ -339,15 +339,13 @@ class GaussianDiffusionDualLoss:
                 self._predict_xstart_from_xprev(x_t=x, t=t, xprev=model_output)
             )
             model_mean = model_output
-        elif self.model_mean_type == ModelMeanType.START_X:
-            pred_xstart = process_xstart(model_output)
-            model_mean, _, _ = self.q_posterior_mean_variance(
-                x_start=pred_xstart, x_t=x, t=t
-            )
-        elif self.model_mean_type == ModelMeanType.EPSILON:
-            pred_xstart = process_xstart(
-                self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
-            )
+        elif self.model_mean_type in [ModelMeanType.START_X, ModelMeanType.EPSILON]:
+            if self.model_mean_type == ModelMeanType.START_X:
+                pred_xstart = process_xstart(model_output)
+            else:
+                pred_xstart = process_xstart(
+                    self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
+                )
             model_mean, _, _ = self.q_posterior_mean_variance(
                 x_start=pred_xstart, x_t=x, t=t
             )
@@ -399,6 +397,71 @@ class GaussianDiffusionDualLoss:
         if self.rescale_timesteps:
             return t.float() * (1000.0 / self.num_timesteps)
         return t
+
+    def condition_mean(self, cond_fn, p_mean_var, x, t, model_kwargs=None):
+        """
+        Compute the mean for the previous step, given a function cond_fn that
+        computes the gradient of a conditional log probability with respect to
+        x. In particular, cond_fn computes grad(log(p(y|x))), and we want to
+        condition on y.
+
+        This uses the conditioning strategy from Sohl-Dickstein et al. (2015).
+        """
+        gradient = cond_fn(x, self._scale_timesteps(t), **model_kwargs)
+        new_mean = (
+            p_mean_var["mean"].float() + p_mean_var["variance"] * gradient.float()
+        )
+        return new_mean
+
+    def condition_score(self, cond_fn, p_mean_var, x, t, model_kwargs=None):
+        """
+        Compute what the p_mean_variance output would have been, should the
+        model's score function be conditioned by cond_fn.
+
+        See condition_mean() for details on cond_fn.
+
+        Unlike condition_mean(), this instead uses the conditioning strategy
+        from Song et al (2020).
+        """
+        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
+
+        eps = self._predict_eps_from_xstart(x, t, p_mean_var["pred_xstart"])
+        eps = eps - (1 - alpha_bar).sqrt() * cond_fn(
+            x, self._scale_timesteps(t), **model_kwargs
+        )
+
+        out = p_mean_var.copy()
+        out["pred_xstart"] = self._predict_xstart_from_eps(x, t, eps)
+        out["mean"], _, _ = self.q_posterior_mean_variance(
+            x_start=out["pred_xstart"], x_t=x, t=t
+        )
+
+        return out
+
+    def condition_clf_free(self, model, x, t, w, model_kwargs=None):
+        """
+        cls-free-diff
+        """
+        model_kwargs["clf_free"] = True  # use clf-free guidance
+        model_kwargs["threshold"] = -1  # make sure disable training mode in sampling
+
+        # null embedding
+        dict_null = model_kwargs.copy()
+        dict_null["null"] = True  # label is not used in null embedding
+        eps_uncond = model(x, self._scale_timesteps(t), **dict_null)
+        
+        # Handle dual loss model output
+        if isinstance(eps_uncond, tuple) and len(eps_uncond) == 3:
+            eps_uncond = eps_uncond[0]  # Only use the model output, ignore features
+
+        dict_cond = model_kwargs.copy()
+        eps_cond = model(x, self._scale_timesteps(t), **dict_cond)
+        
+        # Handle dual loss model output
+        if isinstance(eps_cond, tuple) and len(eps_cond) == 3:
+            eps_cond = eps_cond[0]  # Only use the model output, ignore features
+
+        return (1 + w) * eps_cond - w * eps_uncond
 
     def boundary_aware_consistency_loss(self, x0, feat_enc, feat_dec):
         """
@@ -463,8 +526,6 @@ class GaussianDiffusionDualLoss:
         :return: a dict with the key "loss" containing a tensor of shape [N].
                  Some mean or variance settings may also have other keys.
         """
-        if model_kwargs is None:
-            model_kwargs = {}
         if 'y' not in model_kwargs.keys():
             model_kwargs = {}
 
@@ -590,6 +651,329 @@ class GaussianDiffusionDualLoss:
         # otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
+
+    def ddim_sample(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        eta=0.0,
+        w=-1,
+        noise_fn=None,
+    ):
+        """
+        Sample x_{t-1} from the model using DDIM.
+        w = None to disable classifier-free guidance
+        Same usage as p_sample().
+        """
+
+        clf_free = (
+            functools.partial(
+                self.condition_clf_free, model=model, w=w, model_kwargs=model_kwargs
+            )
+            if w != -1
+            else None
+        )
+
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+            clf_free=clf_free,
+        )
+
+        if cond_fn is not None and w == -1:  # for classifier guidance
+            cond_y = {'y':model_kwargs['y']}
+            out = self.condition_score(cond_fn, out, x, t, model_kwargs=cond_y)
+        # or it is unguided
+        # Usually our model outputs epsilon, but we re-derive it
+        # in case we used x_start or x_prev prediction.
+        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+
+        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
+        sigma = (
+            eta
+            * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
+            * th.sqrt(1 - alpha_bar / alpha_bar_prev)
+        )
+        # Equation 12.
+        if noise_fn is None:
+            noise = th.randn_like(x)
+        else:
+            noise = noise_fn(x, t)
+
+        mean_pred = (
+            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
+            + th.sqrt(1 - alpha_bar_prev - sigma**2) * eps
+        )
+        nonzero_mask = (
+            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        )  # no noise when t == 0
+        sample = mean_pred + nonzero_mask * sigma * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
+    def ddim_sample_loop(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        eta=0.0,
+        w=-1,
+        sample_steps=None,
+        noise_fn=None,
+    ):
+        """
+        Generate samples from the model using DDIM.
+
+        Same usage as p_sample_loop().
+        """
+        final = None
+        for sample in self.ddim_sample_loop_progressive(
+            model,
+            shape,
+            noise=noise,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            cond_fn=cond_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progress=progress,
+            eta=eta,
+            sample_steps=sample_steps,
+            w=w,
+            noise_fn=noise_fn,
+        ):
+            final = sample
+        return final["sample"]
+
+    def ddim_sample_loop_progressive(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        eta=0.0,
+        sample_steps=None,
+        w=-1,
+        noise_fn=None,
+    ):
+        """
+        Use DDIM to sample from the model and yield intermediate samples from
+        each timestep of DDIM.
+
+        Same usage as p_sample_loop_progressive().
+        """
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape, (tuple, list))
+        
+        if noise is not None:
+            img = noise
+        else:
+            img = th.randn(*shape, device=device)
+            if noise_fn is not None:
+                t = th.tensor([self.num_timesteps - 1] * shape[0], device=device)
+                img = noise_fn(img, t)
+
+        if sample_steps is None:
+            indices = list(range(self.num_timesteps))[::-1]
+        else:
+            indices = list(range(sample_steps))[::-1]
+
+        if progress:
+            # Lazy import so that we don't depend on tqdm.
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            t = th.tensor([i] * shape[0], device=device)
+            with th.no_grad():
+                out = self.ddim_sample(
+                    model,
+                    img,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                    eta=eta,
+                    w=w,
+                    noise_fn=noise_fn,
+                )
+                yield out
+                img = out["sample"]
+
+    def ddim_reverse_sample(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        eta=0.0,
+        w=-1,
+    ):
+        """
+        Sample x_{t+1} from the model using DDIM reverse ODE.
+        XS:
+            Modified this function to include classifier guidance (i.e. condition_score).
+            Note that the (source) label information is included in model_kwargs.
+        """
+        assert eta == 0.0, "Reverse ODE only for deterministic path"
+
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        if cond_fn is not None:
+            out = self.condition_score(cond_fn, out, x, t, model_kwargs)
+        
+        # XS: classifier-free guidance
+        if w > 0:
+            out = self.condition_clf_free(model, x, t, w, model_kwargs)
+        
+        # Usually our model outputs epsilon, but we re-derive it
+        # in case we used x_start or x_prev prediction.
+        # XS: the following is the same as _predict_eps_from_xstart
+        eps = (
+            _extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
+            - out["pred_xstart"]
+        ) / _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x.shape)
+
+        alpha_bar_next = _extract_into_tensor(self.alphas_cumprod_next, t, x.shape)
+
+        # Equation 12. reversed
+        mean_pred = (
+            out["pred_xstart"] * th.sqrt(alpha_bar_next)
+            + th.sqrt(1 - alpha_bar_next) * eps
+        )
+
+        return {"sample": mean_pred, "pred_xstart": out["pred_xstart"], "eps": eps}
+
+    def calc_pred_xstart_loop(
+        self,
+        model,
+        x_start,
+        w,
+        modality=0,  # 0:flair, 1:t1, 2:t1ce, 3:t2 (BRATS) 0:t1 (ATLAS) or list of modalities
+        d_reverse=False,
+        sample_steps=None,
+        clip_denoised=True,
+        dynamic_clip=False,
+        model_kwargs=None,
+        model_kwargs_reverse=None,
+    ):
+        """
+        Compute the predicted x_0 for guided (healthy) and unguided for each time step.
+
+        :param model: the model to evaluate loss on.
+        :param d_reverse: if True, use ddim (deterministic) encoding else ddpm stochastic encoding.
+        :param clip_denoised: if True, clip denoised samples.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+
+        :return: a dict containing the following keys:
+                 - 'xstart': a tensor of shape [N, T, C, H, W] of predicted x_0 guided to healthy.
+                 - 'xstart_null': a tensor of shape [N, T, C, H, W] of predicted x_0 for unguided.
+        """
+        device = x_start.device
+        batch_size = x_start.shape[0]
+
+        xstart = []
+        xstart_null = []
+
+        steps = sample_steps if sample_steps else self.num_timesteps
+
+        x_t = None
+        for t in list(range(steps)):
+            t_batch = th.tensor([t] * batch_size, device=device)
+
+            # Calculate predicted x_0 at the current timestep
+            with th.no_grad():
+                noise = th.randn_like(x_start)
+                if not d_reverse:
+                    x_t = self.q_sample(x_start=x_start, t=t_batch, noise=noise)
+                else:
+                    if t == 0:
+                        x_t = self.q_sample(x_start=x_start, t=t_batch, noise=noise) # x_1
+                    else:
+                        out_re = self.ddim_reverse_sample(
+                            model,
+                            x=x_t,
+                            t=t_batch,
+                            clip_denoised=clip_denoised,
+                            model_kwargs=model_kwargs_reverse,
+                        )
+
+                        x_t = out_re["sample"]
+                         
+
+                out = self.ddim_sample(
+                    model,
+                    x_t,
+                    t_batch,
+                    clip_denoised=clip_denoised,
+                    model_kwargs=model_kwargs,
+                    denoised_fn=clamp_to_spatial_quantile if dynamic_clip else None,
+                    eta=0.0,
+                    w=w,
+                )
+
+                out_null = self.ddim_sample(
+                    model,
+                    x_t,
+                    t_batch,
+                    clip_denoised=clip_denoised,
+                    model_kwargs=model_kwargs,
+                    denoised_fn=clamp_to_spatial_quantile if dynamic_clip else None,
+                    eta=0.0,
+                    w=-1,
+                )  # shut down classifier-free guidance
+
+            xstart.append(out["pred_xstart"])
+            xstart_null.append(out_null["pred_xstart"])
+
+        xstart = th.stack(xstart, dim=1)  # [N, T, C, H, W]
+        xstart_null = th.stack(xstart_null, dim=1)  # [N, T, C, H, W]
+        
+        # Extract specific modalities if modality is specified
+        if isinstance(modality, (list, tuple)):
+            xstart = xstart[:, :, modality, ...]
+            xstart_null = xstart_null[:, :, modality, ...]
+        elif isinstance(modality, int) and modality >= 0:
+            xstart = xstart[:, :, modality, ...]
+            xstart_null = xstart_null[:, :, modality, ...]
+
+        return {
+            "xstart": xstart,
+            "xstart_null": xstart_null,
+        }
 
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):

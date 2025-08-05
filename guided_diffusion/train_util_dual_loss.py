@@ -12,6 +12,14 @@ from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
+from torchvision.utils import make_grid, save_image
+
+import random
+
+# For ImageNet experiments, this was a good default value.
+# We found that the lg_loss_scale quickly climbed to
+# 20-21 within the first ~1K steps of training.
+INITIAL_LOG_LOSS_SCALE = 20.0
 
 # For convenience, a large number of training steps.
 SCHEDULE_SAMPLER_CLASSES = {
@@ -39,10 +47,19 @@ class TrainLoopDualLoss:
         schedule_sampler=None,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        sample_shape=None,
+        img_dir=None,
+        threshold=-1,
+        w=-1,
+        noise_fn=None,
+        num_classes=None,
+        sample_fn=None,
+        ddpm_sampling=False,
+        total_epochs=None,
     ):
         self.model = model
         self.diffusion = diffusion
-        self.data = data
+        self.data, self.sampler = data
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
         self.lr = lr
@@ -59,10 +76,21 @@ class TrainLoopDualLoss:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        self.total_epochs = total_epochs
 
         self.step = 0
         self.resume_step = 0
-        self.global_batch = self.batch_size * dist.get_world_size()
+        self.global_batch = self.batch_size # global batch size is the same as batch size
+        
+        self.sample_shape = sample_shape
+        self.img_dir = img_dir
+        self.threshold = threshold
+        self.w = w
+        self.num_classes = num_classes
+        
+        self.ddpm_sampling = ddpm_sampling
+        self.sample_fn = sample_fn
+        self.noise_fn = noise_fn
 
         self.sync_cuda = th.cuda.is_available()
 
@@ -121,7 +149,7 @@ class TrainLoopDualLoss:
                     )
                 )
 
-        dist_util.sync_params(self.model.parameters())
+        # dist_util.sync_params(self.model.parameters())  # 单GPU训练不需要参数同步
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -136,7 +164,7 @@ class TrainLoopDualLoss:
                 )
                 ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
 
-        dist_util.sync_params(ema_params)
+        # dist_util.sync_params(ema_params)  # 单GPU训练不需要参数同步
         return ema_params
 
     def _load_optimizer_state(self):
@@ -152,20 +180,27 @@ class TrainLoopDualLoss:
             self.opt.load_state_dict(state_dict)
 
     def run_loop(self):
-        while (
-            not self.lr_anneal_steps
-            or self.step + self.resume_step < self.lr_anneal_steps
-        ):
-            batch, cond = next(self.data)
-            self.run_step(batch, cond)
-            if self.step % self.log_interval == 0:
-                logger.dumpkvs()
-            if self.step % self.save_interval == 0:
-                self.save()
-                # Run for a finite amount of time in integration tests.
-                if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
-                    return
-            self.step += 1
+        # while (
+        #         not self.lr_anneal_steps
+        #         or self.step + self.resume_step < self.lr_anneal_steps
+        # ):
+            
+            # batch, cond = next(self.data)
+            # logger.log(f"batch mean: {batch.mean()}, std: {batch.std()}")
+        for epoch in range(self.total_epochs):
+            self.sampler.set_epoch(epoch)
+            for batch, cond in self.data:            
+                self.step += 1
+                self.run_step(batch, cond)
+                if self.step % self.log_interval == 0:
+                    logger.dumpkvs()
+                if self.step % self.save_interval == 0:
+                    self.save()
+                    # Run for a finite amount of time in integration tests.
+                    if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+                        logger.log("stopping early for testing")
+                        return
+            
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
@@ -189,12 +224,16 @@ class TrainLoopDualLoss:
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
+            # for clf-free guidance
+            micro_cond['threshold'] = self.threshold
+            
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
                 self.ddp_model,
                 micro,
                 t,
                 model_kwargs=micro_cond,
+                noise_fn=self.noise_fn,
             )
 
             if last_batch or not self.use_ddp:
@@ -228,7 +267,7 @@ class TrainLoopDualLoss:
 
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
-        logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
+        logger.logkv("samples", (self.step + self.resume_step) * self.global_batch)
 
     def save(self):
         def save_checkpoint(rate, params):
@@ -237,14 +276,37 @@ class TrainLoopDualLoss:
                 logger.log(f"saving model {rate}...")
                 if not rate:
                     filename = f"model{(self.step+self.resume_step):06d}.pt"
+                    
+                    # save samples
+                    for w in self.w:
+                     
+                        logger.log(f"sampling with w = {w}...")
+                        samples, samples_for_each_cls = self.sample_fn(self.model, self.diffusion, 
+                                                                       num_classes=self.num_classes, 
+                                                                         w=w, sample_shape=self.sample_shape, 
+                                                                         normalize_img=True,
+                                                                         noise_fn=self.noise_fn,
+                                                                         ddpm=self.ddpm_sampling,)
+                        
+                        if self.sample_shape[1] == 4:
+                            samples = samples.reshape(-1, 1, *self.sample_shape[2:])
+                            samples_for_each_cls = self.sample_shape[1]
+                            
+                        grid = make_grid(samples, nrow=samples_for_each_cls)
+                        path = os.path.join(self.img_dir, f'{self.step + self.resume_step}_{w}.png')
+                        save_image(grid, path)
+                        
                 else:
                     filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
                 with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
                     th.save(state_dict, f)
 
         save_checkpoint(0, self.mp_trainer.master_params)
+        
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
+            
+        
 
         if dist.get_rank() == 0:
             with bf.BlobFile(
