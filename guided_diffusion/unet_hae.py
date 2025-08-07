@@ -605,7 +605,7 @@ class HAEUNetModel(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
-        # 中间块：保持原有设计
+        # 中间块：与UNet-V2完全一致，不使用异构块
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -651,18 +651,31 @@ class HAEUNetModel(nn.Module):
                 ]
                 ch = int(model_channels * mult)
                 
-                # 在解码器中使用混合CNN-Transformer块
+                # 标准注意力块（与UNet-V2保持一致）
                 if ds in attention_resolutions:
                     layers.append(
-                        HybridCNNTransformerBlock(
+                        AttentionBlock(
                             ch,
-                            time_embed_dim,
-                            dropout=dropout,
                             use_checkpoint=use_checkpoint,
+                            num_heads=num_heads_upsample,
+                            num_head_channels=num_head_channels,
+                            encoder_channels=encoder_channels,
                         )
                     )
                     
+                # 在上采样前添加异构块（根据图示，每个上采样前都有双分支结构）
                 if level and i == num_res_blocks:
+                    # 添加异构块在上采样前
+                    if use_hae:
+                        layers.append(
+                            HybridCNNTransformerBlock(
+                                ch,
+                                time_embed_dim,
+                                dropout=dropout,
+                                use_checkpoint=use_checkpoint,
+                            )
+                        )
+                    
                     out_ch = ch
                     layers.append(
                         ResBlock(

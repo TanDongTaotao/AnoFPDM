@@ -1,0 +1,419 @@
+<svg width="1200" height="1600" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font-family: Arial, sans-serif; font-size: 24px; font-weight: bold; text-anchor: middle; }
+      .subtitle { font-family: Arial, sans-serif; font-size: 18px; font-weight: bold; text-anchor: middle; }
+      .label { font-family: Arial, sans-serif; font-size: 14px; text-anchor: middle; }
+      .small-label { font-family: Arial, sans-serif; font-size: 12px; text-anchor: middle; }
+      .block { fill: #e8f4fd; stroke: #2196f3; stroke-width: 2; }
+      .encoder { fill: #fff3e0; stroke: #ff9800; stroke-width: 2; }
+      .decoder { fill: #f3e5f5; stroke: #9c27b0; stroke-width: 2; }
+      .hybrid { fill: #e8f5e8; stroke: #4caf50; stroke-width: 2; }
+      .attention { fill: #fce4ec; stroke: #e91e63; stroke-width: 2; }
+      .arrow { stroke: #333; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .connection { stroke: #666; stroke-width: 1; stroke-dasharray: 5,5; fill: none; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333" />
+    </marker>
+  </defs>
+  
+  <!-- 标题 -->
+  <text x="600" y="30" class="title">HAE (Heterogeneous AutoEncoder) 家族网络架构</text>
+  
+  <!-- HAE 原版 -->
+  <g transform="translate(50, 60)">
+    <text x="150" y="20" class="subtitle">HAE 原版 (HAEUNetModel)</text>
+    
+    <!-- 输入 -->
+    <rect x="100" y="40" width="100" height="30" class="block"/>
+    <text x="150" y="60" class="label">输入 (B,C,H,W)</text>
+    
+    <!-- 编码器 -->
+    <rect x="50" y="100" width="200" height="120" class="encoder"/>
+    <text x="150" y="120" class="label">编码器 (CNN)</text>
+    <rect x="70" y="130" width="160" height="25" class="block"/>
+    <text x="150" y="147" class="small-label">ResBlock + AttentionBlock</text>
+    <rect x="70" y="160" width="160" height="25" class="block"/>
+    <text x="150" y="177" class="small-label">Downsample</text>
+    <rect x="70" y="190" width="160" height="25" class="block"/>
+    <text x="150" y="207" class="small-label">ResBlock + AttentionBlock</text>
+    
+    <!-- 中间块 -->
+    <rect x="75" y="240" width="150" height="40" class="attention"/>
+    <text x="150" y="265" class="label">中间块 (ResBlock + Attn)</text>
+    
+    <!-- 解码器 -->
+    <rect x="50" y="300" width="200" height="180" class="decoder"/>
+    <text x="150" y="320" class="label">解码器 (混合架构)</text>
+    <rect x="70" y="330" width="160" height="25" class="block"/>
+    <text x="150" y="347" class="small-label">ResBlock + AttentionBlock</text>
+    
+    <!-- 混合块 -->
+    <rect x="70" y="360" width="160" height="60" class="hybrid"/>
+    <text x="150" y="380" class="small-label">混合CNN-Transformer块</text>
+    <text x="150" y="395" class="small-label">CNN分支 + Transformer分支</text>
+    <text x="150" y="410" class="small-label">特征拼接融合</text>
+    
+    <rect x="70" y="430" width="160" height="25" class="block"/>
+    <text x="150" y="447" class="small-label">Upsample</text>
+    
+    <!-- 输出 -->
+    <rect x="100" y="500" width="100" height="30" class="block"/>
+    <text x="150" y="520" class="label">输出 (B,C,H,W)</text>
+    
+    <!-- 箭头 -->
+    <line x1="150" y1="70" x2="150" y2="100" class="arrow"/>
+    <line x1="150" y1="220" x2="150" y2="240" class="arrow"/>
+    <line x1="150" y1="280" x2="150" y2="300" class="arrow"/>
+    <line x1="150" y1="480" x2="150" y2="500" class="arrow"/>
+  </g>
+  
+  <!-- HAE Lite -->
+  <g transform="translate(400, 60)">
+    <text x="150" y="20" class="subtitle">HAE Lite (HAEUNetModelLite)</text>
+    
+    <!-- 输入 -->
+    <rect x="100" y="40" width="100" height="30" class="block"/>
+    <text x="150" y="60" class="label">输入 (B,C,H,W)</text>
+    
+    <!-- 编码器 -->
+    <rect x="50" y="100" width="200" height="120" class="encoder"/>
+    <text x="150" y="120" class="label">编码器 (CNN)</text>
+    <rect x="70" y="130" width="160" height="25" class="block"/>
+    <text x="150" y="147" class="small-label">ResBlock + AttentionBlock</text>
+    <rect x="70" y="160" width="160" height="25" class="block"/>
+    <text x="150" y="177" class="small-label">Downsample</text>
+    <rect x="70" y="190" width="160" height="25" class="block"/>
+    <text x="150" y="207" class="small-label">ResBlock + AttentionBlock</text>
+    
+    <!-- 中间块 -->
+    <rect x="75" y="240" width="150" height="40" class="attention"/>
+    <text x="150" y="265" class="label">中间块 (ResBlock + Attn)</text>
+    
+    <!-- 解码器 -->
+    <rect x="50" y="300" width="200" height="180" class="decoder"/>
+    <text x="150" y="320" class="label">解码器 (优化混合架构)</text>
+    <rect x="70" y="330" width="160" height="25" class="block"/>
+    <text x="150" y="347" class="small-label">ResBlock + AttentionBlock</text>
+    
+    <!-- 优化混合块 -->
+    <rect x="70" y="360" width="160" height="60" class="hybrid"/>
+    <text x="150" y="380" class="small-label">混合CNN-Transformer块Lite</text>
+    <text x="150" y="395" class="small-label">共享卷积投影层</text>
+    <text x="150" y="410" class="small-label">加权平均融合</text>
+    
+    <rect x="70" y="430" width="160" height="25" class="block"/>
+    <text x="150" y="447" class="small-label">Upsample</text>
+    
+    <!-- 输出 -->
+    <rect x="100" y="500" width="100" height="30" class="block"/>
+    <text x="150" y="520" class="label">输出 (B,C,H,W)</text>
+    
+    <!-- 箭头 -->
+    <line x1="150" y1="70" x2="150" y2="100" class="arrow"/>
+    <line x1="150" y1="220" x2="150" y2="240" class="arrow"/>
+    <line x1="150" y1="280" x2="150" y2="300" class="arrow"/>
+    <line x1="150" y1="480" x2="150" y2="500" class="arrow"/>
+  </g>
+  
+  <!-- HAE V2 -->
+  <g transform="translate(750, 60)">
+    <text x="150" y="20" class="subtitle">HAE V2 (HAEUNetModelV2)</text>
+    
+    <!-- 输入 -->
+    <rect x="100" y="40" width="100" height="30" class="block"/>
+    <text x="150" y="60" class="label">输入 (B,C,H,W)</text>
+    
+    <!-- 编码器 -->
+    <rect x="50" y="100" width="200" height="120" class="encoder"/>
+    <text x="150" y="120" class="label">编码器 (CNN)</text>
+    <rect x="70" y="130" width="160" height="25" class="block"/>
+    <text x="150" y="147" class="small-label">ResBlock + AttentionBlock</text>
+    <rect x="70" y="160" width="160" height="25" class="block"/>
+    <text x="150" y="177" class="small-label">Downsample</text>
+    <rect x="70" y="190" width="160" height="25" class="block"/>
+    <text x="150" y="207" class="small-label">ResBlock + AttentionBlock</text>
+    
+    <!-- 中间块 -->
+    <rect x="75" y="240" width="150" height="40" class="attention"/>
+    <text x="150" y="265" class="label">中间块 (ResBlock + Attn)</text>
+    
+    <!-- 解码器 -->
+    <rect x="50" y="300" width="200" height="180" class="decoder"/>
+    <text x="150" y="320" class="label">解码器 (瓶颈优化架构)</text>
+    <rect x="70" y="330" width="160" height="25" class="block"/>
+    <text x="150" y="347" class="small-label">ResBlock + AttentionBlock</text>
+    
+    <!-- 瓶颈优化混合块 -->
+    <rect x="70" y="360" width="160" height="60" class="hybrid"/>
+    <text x="150" y="380" class="small-label">混合CNN-Transformer块V2</text>
+    <text x="150" y="395" class="small-label">瓶颈MLP (0.25倍)</text>
+    <text x="150" y="410" class="small-label">平均池化+共享投影</text>
+    
+    <rect x="70" y="430" width="160" height="25" class="block"/>
+    <text x="150" y="447" class="small-label">Upsample</text>
+    
+    <!-- 输出 -->
+    <rect x="100" y="500" width="100" height="30" class="block"/>
+    <text x="150" y="520" class="label">输出 (B,C,H,W)</text>
+    
+    <!-- 箭头 -->
+    <line x1="150" y1="70" x2="150" y2="100" class="arrow"/>
+    <line x1="150" y1="220" x2="150" y2="240" class="arrow"/>
+    <line x1="150" y1="280" x2="150" y2="300" class="arrow"/>
+    <line x1="150" y1="480" x2="150" y2="500" class="arrow"/>
+  </g>
+  
+  <!-- 详细组件图 -->
+  <g transform="translate(50, 600)">
+    <text x="500" y="20" class="subtitle">核心组件详细结构</text>
+    
+    <!-- MSTB 原版 -->
+    <g transform="translate(0, 40)">
+      <text x="150" y="20" class="label">MSTB 原版</text>
+      <rect x="50" y="30" width="200" height="120" class="hybrid"/>
+      
+      <!-- 局部信息 -->
+      <rect x="60" y="40" width="80" height="25" class="block"/>
+      <text x="100" y="57" class="small-label">局部信息 (1x1)</text>
+      
+      <!-- 区域信息 -->
+      <rect x="150" y="40" width="80" height="25" class="block"/>
+      <text x="190" y="57" class="small-label">区域信息 (4x4,8x8)</text>
+      
+      <!-- 独立投影层 -->
+      <rect x="60" y="70" width="170" height="20" class="attention"/>
+      <text x="145" y="83" class="small-label">独立线性投影层</text>
+      
+      <!-- 稀疏注意力 -->
+      <rect x="60" y="95" width="170" height="20" class="attention"/>
+      <text x="145" y="108" class="small-label">稀疏多头注意力 (90%稀疏)</text>
+      
+      <!-- 完整MLP -->
+      <rect x="60" y="120" width="170" height="20" class="block"/>
+      <text x="145" y="133" class="small-label">完整MLP (4倍扩展)</text>
+    </g>
+    
+    <!-- MSTB Lite -->
+    <g transform="translate(300, 40)">
+      <text x="150" y="20" class="label">MSTB Lite</text>
+      <rect x="50" y="30" width="200" height="120" class="hybrid"/>
+      
+      <!-- 局部信息 -->
+      <rect x="60" y="40" width="80" height="25" class="block"/>
+      <text x="100" y="57" class="small-label">局部信息 (1x1)</text>
+      
+      <!-- 区域信息 -->
+      <rect x="150" y="40" width="80" height="25" class="block"/>
+      <text x="190" y="57" class="small-label">区域信息 (4x4,8x8)</text>
+      
+      <!-- 共享投影层 -->
+      <rect x="60" y="70" width="170" height="20" class="attention"/>
+      <text x="145" y="83" class="small-label">共享卷积投影层 (Conv1x1)</text>
+      
+      <!-- 稀疏注意力 -->
+      <rect x="60" y="95" width="170" height="20" class="attention"/>
+      <text x="145" y="108" class="small-label">稀疏多头注意力 (90%稀疏)</text>
+      
+      <!-- 完整MLP -->
+      <rect x="60" y="120" width="170" height="20" class="block"/>
+      <text x="145" y="133" class="small-label">完整MLP (4倍扩展)</text>
+    </g>
+    
+    <!-- MSTB V2 -->
+    <g transform="translate(600, 40)">
+      <text x="150" y="20" class="label">MSTB V2</text>
+      <rect x="50" y="30" width="200" height="120" class="hybrid"/>
+      
+      <!-- 局部信息 -->
+      <rect x="60" y="40" width="80" height="25" class="block"/>
+      <text x="100" y="57" class="small-label">局部信息 (1x1)</text>
+      
+      <!-- 区域信息 -->
+      <rect x="150" y="40" width="80" height="25" class="block"/>
+      <text x="190" y="57" class="small-label">区域信息 (4x4,8x8)</text>
+      
+      <!-- 共享投影+池化 -->
+      <rect x="60" y="70" width="170" height="20" class="attention"/>
+      <text x="145" y="83" class="small-label">共享投影+平均池化</text>
+      
+      <!-- 稀疏注意力 -->
+      <rect x="60" y="95" width="170" height="20" class="attention"/>
+      <text x="145" y="108" class="small-label">稀疏多头注意力 (90%稀疏)</text>
+      
+      <!-- 瓶颈MLP -->
+      <rect x="60" y="120" width="170" height="20" class="block"/>
+      <text x="145" y="133" class="small-label">瓶颈MLP (0.25倍扩展)</text>
+    </g>
+  </g>
+  
+  <!-- 混合块对比 -->
+  <g transform="translate(50, 800)">
+    <text x="500" y="20" class="subtitle">混合CNN-Transformer块对比</text>
+    
+    <!-- 原版混合块 -->
+    <g transform="translate(0, 40)">
+      <text x="150" y="20" class="label">原版混合块</text>
+      <rect x="50" y="30" width="200" height="150" class="hybrid"/>
+      
+      <!-- CNN分支 -->
+      <rect x="60" y="40" width="80" height="60" class="encoder"/>
+      <text x="100" y="60" class="small-label">CNN分支</text>
+      <text x="100" y="75" class="small-label">Conv3x3</text>
+      <text x="100" y="90" class="small-label">+ Norm</text>
+      
+      <!-- Transformer分支 -->
+      <rect x="150" y="40" width="80" height="60" class="decoder"/>
+      <text x="190" y="60" class="small-label">Transformer</text>
+      <text x="190" y="75" class="small-label">分支</text>
+      <text x="190" y="90" class="small-label">MSTB</text>
+      
+      <!-- 特征融合 -->
+      <rect x="60" y="110" width="170" height="30" class="attention"/>
+      <text x="145" y="125" class="small-label">特征拼接</text>
+      <text x="145" y="135" class="small-label">Conv1x1(2C→C)</text>
+      
+      <!-- 残差连接 -->
+      <rect x="60" y="150" width="170" height="20" class="block"/>
+      <text x="145" y="163" class="small-label">残差连接</text>
+    </g>
+    
+    <!-- Lite混合块 -->
+    <g transform="translate(300, 40)">
+      <text x="150" y="20" class="label">Lite混合块</text>
+      <rect x="50" y="30" width="200" height="150" class="hybrid"/>
+      
+      <!-- CNN分支 -->
+      <rect x="60" y="40" width="80" height="60" class="encoder"/>
+      <text x="100" y="60" class="small-label">CNN分支</text>
+      <text x="100" y="75" class="small-label">Conv3x3</text>
+      <text x="100" y="90" class="small-label">+ Norm</text>
+      
+      <!-- Transformer分支 -->
+      <rect x="150" y="40" width="80" height="60" class="decoder"/>
+      <text x="190" y="60" class="small-label">Transformer</text>
+      <text x="190" y="75" class="small-label">分支</text>
+      <text x="190" y="90" class="small-label">MSTB Lite</text>
+      
+      <!-- 特征融合 -->
+      <rect x="60" y="110" width="170" height="30" class="attention"/>
+      <text x="145" y="125" class="small-label">加权平均</text>
+      <text x="145" y="135" class="small-label">Conv1x1(C→C)</text>
+      
+      <!-- 残差连接 -->
+      <rect x="60" y="150" width="170" height="20" class="block"/>
+      <text x="145" y="163" class="small-label">残差连接</text>
+    </g>
+    
+    <!-- V2混合块 -->
+    <g transform="translate(600, 40)">
+      <text x="150" y="20" class="label">V2混合块</text>
+      <rect x="50" y="30" width="200" height="150" class="hybrid"/>
+      
+      <!-- CNN分支 -->
+      <rect x="60" y="40" width="80" height="60" class="encoder"/>
+      <text x="100" y="60" class="small-label">CNN分支</text>
+      <text x="100" y="75" class="small-label">Conv3x3</text>
+      <text x="100" y="90" class="small-label">+ Norm</text>
+      
+      <!-- Transformer分支 -->
+      <rect x="150" y="40" width="80" height="60" class="decoder"/>
+      <text x="190" y="60" class="small-label">Transformer</text>
+      <text x="190" y="75" class="small-label">分支</text>
+      <text x="190" y="90" class="small-label">MSTB V2</text>
+      
+      <!-- 特征融合 -->
+      <rect x="60" y="110" width="170" height="30" class="attention"/>
+      <text x="145" y="125" class="small-label">加权平均</text>
+      <text x="145" y="135" class="small-label">Conv1x1(C→C)</text>
+      
+      <!-- 残差连接 -->
+      <rect x="60" y="150" width="170" height="20" class="block"/>
+      <text x="145" y="163" class="small-label">残差连接</text>
+    </g>
+  </g>
+  
+  <!-- 参数量对比表 -->
+  <g transform="translate(50, 1050)">
+    <text x="500" y="20" class="subtitle">参数量与性能对比</text>
+    
+    <!-- 表格 -->
+    <rect x="100" y="40" width="800" height="200" fill="#f5f5f5" stroke="#333" stroke-width="1"/>
+    
+    <!-- 表头 -->
+    <rect x="100" y="40" width="800" height="30" fill="#e0e0e0" stroke="#333" stroke-width="1"/>
+    <text x="150" y="60" class="label">版本</text>
+    <text x="250" y="60" class="label">MLP结构</text>
+    <text x="350" y="60" class="label">投影方式</text>
+    <text x="450" y="60" class="label">融合方式</text>
+    <text x="550" y="60" class="label">相对参数量</text>
+    <text x="650" y="60" class="label">适用场景</text>
+    <text x="800" y="60" class="label">性能特点</text>
+    
+    <!-- 数据行 -->
+    <line x1="100" y1="70" x2="900" y2="70" stroke="#333" stroke-width="1"/>
+    <text x="150" y="90" class="small-label">HAE原版</text>
+    <text x="250" y="90" class="small-label">4倍扩展</text>
+    <text x="350" y="90" class="small-label">独立Linear</text>
+    <text x="450" y="90" class="small-label">拼接</text>
+    <text x="550" y="90" class="small-label">100%</text>
+    <text x="650" y="90" class="small-label">高端GPU</text>
+    <text x="800" y="90" class="small-label">最高质量</text>
+    
+    <line x1="100" y1="100" x2="900" y2="100" stroke="#333" stroke-width="1"/>
+    <text x="150" y="120" class="small-label">HAE Lite</text>
+    <text x="250" y="120" class="small-label">4倍扩展</text>
+    <text x="350" y="120" class="small-label">共享Conv1x1</text>
+    <text x="450" y="120" class="small-label">平均</text>
+    <text x="550" y="120" class="small-label">~70%</text>
+    <text x="650" y="120" class="small-label">中端GPU</text>
+    <text x="800" y="120" class="small-label">平衡性能</text>
+    
+    <line x1="100" y1="130" x2="900" y2="130" stroke="#333" stroke-width="1"/>
+    <text x="150" y="150" class="small-label">HAE V2</text>
+    <text x="250" y="150" class="small-label">瓶颈0.25倍</text>
+    <text x="350" y="150" class="small-label">共享Conv1x1+池化</text>
+    <text x="450" y="150" class="small-label">平均</text>
+    <text x="550" y="150" class="small-label">~40%</text>
+    <text x="650" y="150" class="small-label">移动设备</text>
+    <text x="800" y="150" class="small-label">高效率</text>
+    
+    <!-- 垂直分割线 -->
+    <line x1="200" y1="40" x2="200" y2="240" stroke="#333" stroke-width="1"/>
+    <line x1="300" y1="40" x2="300" y2="240" stroke="#333" stroke-width="1"/>
+    <line x1="400" y1="40" x2="400" y2="240" stroke="#333" stroke-width="1"/>
+    <line x1="500" y1="40" x2="500" y2="240" stroke="#333" stroke-width="1"/>
+    <line x1="600" y1="40" x2="600" y2="240" stroke="#333" stroke-width="1"/>
+    <line x1="700" y1="40" x2="700" y2="240" stroke="#333" stroke-width="1"/>
+  </g>
+  
+  <!-- 技术特点说明 -->
+  <g transform="translate(50, 1300)">
+    <text x="500" y="20" class="subtitle">关键技术特点</text>
+    
+    <!-- 稀疏注意力 -->
+    <rect x="50" y="40" width="250" height="80" class="attention"/>
+    <text x="175" y="60" class="label">稀疏注意力机制</text>
+    <text x="175" y="80" class="small-label">• 减少90%计算量</text>
+    <text x="175" y="95" class="small-label">• 保留对角线和随机连接</text>
+    <text x="175" y="110" class="small-label">• 维持长距离依赖建模</text>
+    
+    <!-- 多尺度处理 -->
+    <rect x="350" y="40" width="250" height="80" class="hybrid"/>
+    <text x="475" y="60" class="label">多尺度处理策略</text>
+    <text x="475" y="80" class="small-label">• 1x1: 像素级细节</text>
+    <text x="475" y="95" class="small-label">• 4x4: 局部模式</text>
+    <text x="475" y="110" class="small-label">• 8x8: 全局结构</text>
+    
+    <!-- 异构设计 -->
+    <rect x="650" y="40" width="250" height="80" class="decoder"/>
+    <text x="775" y="60" class="label">异构设计理念</text>
+    <text x="775" y="80" class="small-label">• 编码器: CNN架构</text>
+    <text x="775" y="95" class="small-label">• 解码器: 混合架构</text>
+    <text x="775" y="110" class="small-label">• 优势互补，性能提升</text>
+  </g>
+  
+  <!-- 版权信息 -->
+  <text x="600" y="1580" class="small-label" style="text-anchor: middle; fill: #666;">HAE家族网络架构图 - 详细技术说明</text>
+</svg>

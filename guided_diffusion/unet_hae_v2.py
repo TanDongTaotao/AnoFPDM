@@ -283,7 +283,7 @@ class AttentionBlock(nn.Module):
             ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
-        self.norm = normalization(channels)
+        self.norm = normalization(channels, swish=0.0)
         self.qkv = conv_nd(1, channels, channels * 3, 1)
         if encoder_channels is not None:
             self.encoder_kv = conv_nd(1, encoder_channels, channels * 2, 1)
@@ -631,14 +631,23 @@ class HAEUNetModelV2(nn.Module):
         self.bottleneck_ratio = bottleneck_ratio  # V2新增
 
         time_embed_dim = model_channels * 4
+        encoder_channels = time_embed_dim
+        
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
 
-        if self.num_classes is not None:
-            self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+        if self.num_classes is not None and clf_free:
+            self.label_emb = nn.Embedding(self.num_classes, model_channels)
+            self.class_emb = nn.Sequential(
+                linear(model_channels, time_embed_dim),
+                nn.SiLU(),
+                linear(time_embed_dim, time_embed_dim),
+            )
+        elif self.num_classes is not None and not clf_free:
+            self.label_emb = nn.Embedding(self.num_classes, time_embed_dim)
 
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
@@ -662,27 +671,16 @@ class HAEUNetModelV2(nn.Module):
                 ]
                 ch = int(mult * model_channels)
                 if ds in attention_resolutions:
-                    if use_hae:
-                        # 使用HAE V2混合块
-                        layers.append(
-                            HybridCNNTransformerBlockV2(
-                                ch,
-                                time_embed_dim,
-                                dropout=dropout,
-                                use_checkpoint=use_checkpoint,
-                                bottleneck_ratio=bottleneck_ratio
-                            )
+                    # 编码器始终使用标准的AttentionBlock，不使用HAE异构结构
+                    layers.append(
+                        AttentionBlock(
+                            ch,
+                            use_checkpoint=use_checkpoint,
+                            num_heads=num_heads,
+                            num_head_channels=num_head_channels,
+                            encoder_channels=encoder_channels,
                         )
-                    else:
-                        layers.append(
-                            AttentionBlock(
-                                ch,
-                                use_checkpoint=use_checkpoint,
-                                num_heads=num_heads,
-                                num_head_channels=num_head_channels,
-                                encoder_channels=None,
-                            )
-                        )
+                    )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
                 input_block_chans.append(ch)
@@ -711,6 +709,7 @@ class HAEUNetModelV2(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
+        # 中间块：使用标准注意力块，确保编码器和中间块都有标准注意力
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -720,18 +719,12 @@ class HAEUNetModelV2(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
             ),
-            HybridCNNTransformerBlockV2(
-                ch,
-                time_embed_dim,
-                dropout=dropout,
-                use_checkpoint=use_checkpoint,
-                bottleneck_ratio=bottleneck_ratio
-            ) if use_hae else AttentionBlock(
+            AttentionBlock(
                 ch,
                 use_checkpoint=use_checkpoint,
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
-                encoder_channels=None,
+                encoder_channels=encoder_channels,
             ),
             ResBlock(
                 ch,
@@ -760,9 +753,23 @@ class HAEUNetModelV2(nn.Module):
                     )
                 ]
                 ch = int(model_channels * mult)
+                
+                # 标准注意力块（与UNet-V2保持一致）
                 if ds in attention_resolutions:
+                    layers.append(
+                        AttentionBlock(
+                            ch,
+                            use_checkpoint=use_checkpoint,
+                            num_heads=num_heads_upsample,
+                            num_head_channels=num_head_channels,
+                            encoder_channels=encoder_channels,
+                        )
+                    )
+                    
+                # 在上采样前添加异构块（根据图示，每个上采样前都有双分支结构）
+                if level and i == num_res_blocks:
+                    # 添加异构块在上采样前
                     if use_hae:
-                        # 使用HAE V2混合块
                         layers.append(
                             HybridCNNTransformerBlockV2(
                                 ch,
@@ -772,17 +779,7 @@ class HAEUNetModelV2(nn.Module):
                                 bottleneck_ratio=bottleneck_ratio
                             )
                         )
-                    else:
-                        layers.append(
-                            AttentionBlock(
-                                ch,
-                                use_checkpoint=use_checkpoint,
-                                num_heads=num_heads_upsample,
-                                num_head_channels=num_head_channels,
-                                encoder_channels=None,
-                            )
-                        )
-                if level and i == num_res_blocks:
+                    
                     out_ch = ch
                     layers.append(
                         ResBlock(
@@ -827,30 +824,46 @@ class HAEUNetModelV2(nn.Module):
     def forward(self, x, timesteps, y=None, threshold=-1, null=False, clf_free=False):
         """
         Apply the model to an input batch.
-
-        :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param y: an [N] Tensor of labels, if class-conditional.
-        :return: an [N x C x ...] Tensor of outputs.
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
+        cemb_mm = None
+        
+        # 条件设置（与HAE原版保持一致）
         if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
+            cemb = None
+            if threshold != -1: 
+                assert threshold > 0
+                cemb = self.class_emb(self.label_emb(y))
+                mask = th.rand(cemb.shape[0])<threshold
+                cemb[np.where(mask)[0]] = 0
+                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb)
+            elif threshold == -1 and clf_free: 
+                if null:
+                    cemb = th.zeros_like(emb)
+                else:
+                    cemb = self.class_emb(self.label_emb(y)) 
+                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb) 
+            else:
+                raise Exception("Invalid condition setup")
+                
+            assert cemb is not None
+            assert cemb_mm is not None
+            emb = emb + cemb 
 
+        # 编码器前向传播
         h = x.type(self.dtype)
         for module in self.input_blocks:
-            h = module(h, emb)
+            h = module(h, emb, cemb_mm)
             hs.append(h)
-        h = self.middle_block(h, emb)
+            
+        # 中间块
+        h = self.middle_block(h, emb, cemb_mm)
+        
+        # 解码器前向传播（使用混合CNN-Transformer）
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb)
+            h = module(h, emb, cemb_mm)
+            
         h = h.type(x.dtype)
         return self.out(h)
