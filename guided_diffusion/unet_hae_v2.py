@@ -18,7 +18,7 @@ from .nn import (
     timestep_embedding,
 )
 
-# 复用原有的基础模块
+
 class AttentionPool2d(nn.Module):
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
@@ -75,8 +75,6 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, AttentionBlock):
                 x = layer(x, cemb_mm)
-            elif isinstance(layer, HybridCNNTransformerBlock):
-                x = layer(x, emb)
             else:
                 x = layer(x)
         return x
@@ -85,6 +83,11 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
 class Upsample(nn.Module):
     """
     An upsampling layer with an optional convolution.
+
+    :param channels: channels in the inputs and outputs.
+    :param use_conv: a bool determining if a convolution is applied.
+    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
+                 upsampling occurs in the inner-two dimensions.
     """
 
     def __init__(self, channels, use_conv, dims=2, out_channels=None):
@@ -99,7 +102,9 @@ class Upsample(nn.Module):
     def forward(self, x):
         assert x.shape[1] == self.channels
         if self.dims == 3:
-            x = F.interpolate(x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest")
+            x = F.interpolate(
+                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
+            )
         else:
             x = F.interpolate(x, scale_factor=2, mode="nearest")
         if self.use_conv:
@@ -110,6 +115,11 @@ class Upsample(nn.Module):
 class Downsample(nn.Module):
     """
     A downsampling layer with an optional convolution.
+
+    :param channels: channels in the inputs and outputs.
+    :param use_conv: a bool determining if a convolution is applied.
+    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
+                 downsampling occurs in the inner-two dimensions.
     """
 
     def __init__(self, channels, use_conv, dims=2, out_channels=None):
@@ -120,7 +130,9 @@ class Downsample(nn.Module):
         self.dims = dims
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
-            self.op = conv_nd(dims, self.channels, self.out_channels, 3, stride=stride, padding=1)
+            self.op = conv_nd(
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=1
+            )
         else:
             assert self.channels == self.out_channels
             self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
@@ -133,6 +145,18 @@ class Downsample(nn.Module):
 class ResBlock(TimestepBlock):
     """
     A residual block that can optionally change the number of channels.
+
+    :param channels: the number of input channels.
+    :param emb_channels: the number of timestep embedding channels.
+    :param dropout: the rate of dropout.
+    :param out_channels: if specified, the number of out channels.
+    :param use_conv: if True and out_channels is specified, use a spatial
+        convolution instead of a smaller 1x1 convolution to change the
+        channels in the skip connection.
+    :param dims: determines if the signal is 1D, 2D, or 3D.
+    :param use_checkpoint: if True, use gradient checkpointing on this module.
+    :param up: if True, use this block for upsampling.
+    :param down: if True, use this block for downsampling.
     """
 
     def __init__(
@@ -158,8 +182,8 @@ class ResBlock(TimestepBlock):
         self.use_scale_shift_norm = use_scale_shift_norm
 
         self.in_layers = nn.Sequential(
-            normalization(channels, swish=1.0),
-            nn.Identity(),
+            normalization(channels),
+            nn.SiLU(),
             conv_nd(dims, channels, self.out_channels, 3, padding=1),
         )
 
@@ -182,20 +206,35 @@ class ResBlock(TimestepBlock):
             ),
         )
         self.out_layers = nn.Sequential(
-            normalization(self.out_channels, swish=0.0 if use_scale_shift_norm else 1.0),
-            nn.SiLU() if use_scale_shift_norm else nn.Identity(),
+            normalization(self.out_channels),
+            nn.SiLU(),
             nn.Dropout(p=dropout),
-            zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)),
+            zero_module(
+                conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)
+            ),
         )
 
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
-            self.skip_connection = conv_nd(dims, channels, self.out_channels, 3, padding=1)
+            self.skip_connection = conv_nd(
+                dims, channels, self.out_channels, 3, padding=1
+            )
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
     def forward(self, x, emb):
+        """
+        Apply the block to a Tensor, conditioned on a timestep embedding.
+        """
+        if self.use_checkpoint:
+            return checkpoint(
+                self._forward, (x, emb), self.parameters(), self.use_checkpoint
+            )
+        else:
+            return self._forward(x, emb)
+
+    def _forward(self, x, emb):
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
@@ -221,6 +260,9 @@ class ResBlock(TimestepBlock):
 class AttentionBlock(nn.Module):
     """
     An attention block that allows spatial positions to attend to each other.
+
+    Originally ported from here, but adapted to the N-d case.
+    https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116dcc91b1c5b68b1e0b8e/diffusion_tf/models/unet.py#L66.
     """
 
     def __init__(
@@ -241,29 +283,36 @@ class AttentionBlock(nn.Module):
             ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
-        self.norm = normalization(channels, swish=0.0)
+        self.norm = normalization(channels)
         self.qkv = conv_nd(1, channels, channels * 3, 1)
-        self.attention = QKVAttention(self.num_heads)
-
         if encoder_channels is not None:
             self.encoder_kv = conv_nd(1, encoder_channels, channels * 2, 1)
+        self.attention = QKVAttention(self.num_heads)
+
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x, cemb_mm=None):
+        if self.use_checkpoint:
+            return checkpoint(self._forward, (x, cemb_mm), self.parameters(), True)
+        else:
+            return self._forward(x, cemb_mm)
+
+    def _forward(self, x, cemb_mm):
         b, c, *spatial = x.shape
-        qkv = self.qkv(self.norm(x).view(b, c, -1))
+        x = x.reshape(b, c, -1)
+        qkv = self.qkv(self.norm(x))
         if cemb_mm is not None:
-            cemb_mm_expand = self.encoder_kv(cemb_mm)
-            h = self.attention(qkv, cemb_mm_expand)
+            encoder_out = self.encoder_kv(cemb_mm)
+            h = self.attention(qkv, encoder_out)
         else:
             h = self.attention(qkv)
         h = self.proj_out(h)
-        return x + h.reshape(b, c, *spatial)
+        return (x + h).reshape(b, c, *spatial)
 
 
 class QKVAttention(nn.Module):
     """
-    A module which performs QKV attention.
+    A module which performs QKV attention. Matches legacy QKVAttention + input/ouput heads shaping
     """
 
     def __init__(self, n_heads):
@@ -271,6 +320,12 @@ class QKVAttention(nn.Module):
         self.n_heads = n_heads
 
     def forward(self, qkv, encoder_kv=None):
+        """
+        Apply QKV attention.
+
+        :param qkv: an [N x (H * 3 * C) x T] tensor of Qs, Ks, and Vs.
+        :return: an [N x (H * C) x T] tensor after attention.
+        """
         bs, width, length = qkv.shape
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
@@ -283,20 +338,42 @@ class QKVAttention(nn.Module):
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
             "bct,bcs->bts", q * scale, k * scale
-        )
+        )  # More stable with f16 than dividing afterwards
         weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
         a = th.einsum("bts,bcs->bct", weight, v)
         return a.reshape(bs, -1, length)
 
 
-# 新增：多尺度稀疏Transformer块（MSTB）
-class MultiScaleSparseTransformerBlock(nn.Module):
+# 新增：瓶颈MLP结构 - HAE V2的核心优化
+class BottleneckMLP(nn.Module):
     """
-    Multi-Scale Sparse Transformer Block (MSTB)
-    实现论文中的多尺度稀疏Transformer，包含局部信息和区域信息处理
+    瓶颈MLP结构，通过降维-升维的方式大幅减少参数量
     """
     
-    def __init__(self, channels, num_heads=8, dropout=0.1, patch_sizes=[1, 4, 8]):
+    def __init__(self, channels, bottleneck_ratio=0.25, dropout=0.1):
+        super().__init__()
+        self.channels = channels
+        bottleneck_dim = max(1, int(channels * bottleneck_ratio))
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, bottleneck_dim),  # 降维
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(bottleneck_dim, channels),  # 升维
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class MultiScaleSparseTransformerBlockV2(nn.Module):
+    """
+    Multi-Scale Sparse Transformer Block (MSTB) - V2 Version
+    在Lite版本基础上，使用瓶颈MLP结构进一步减少参数量
+    """
+    
+    def __init__(self, channels, num_heads=8, dropout=0.1, patch_sizes=[1, 4, 8], bottleneck_ratio=0.25):
         super().__init__()
         self.channels = channels
         self.num_heads = num_heads
@@ -304,23 +381,17 @@ class MultiScaleSparseTransformerBlock(nn.Module):
         
         # 局部信息处理
         self.local_norm = nn.LayerNorm(channels)
-        # 移除位置嵌入参数以避免参数数量不匹配
-        # self.local_pos_embed = nn.Parameter(th.randn(1, channels) * 0.02)
         
-        # 区域信息处理 - 多尺度
+        # 区域信息处理 - 多尺度，使用共享的卷积投影层（借鉴ViT）
         self.regional_norms = nn.ModuleList([
             nn.LayerNorm(channels) for _ in patch_sizes[1:]
         ])
-        # 移除位置嵌入参数以避免参数数量不匹配
-        # self.regional_pos_embeds = nn.ParameterList([
-        #     nn.Parameter(th.randn(1, channels) * 0.02) for _ in patch_sizes[1:]
-        # ])
         
-        # 预先创建投影层以避免动态创建导致的参数不匹配
-        self.patch_projections = nn.ModuleList([
-            nn.Linear(channels * patch_size * patch_size, channels) 
-            for patch_size in patch_sizes[1:]
-        ])
+        # 共享的卷积投影层 - 这是关键的参数精简部分
+        # 使用单个卷积层来处理所有尺度的patch，而不是为每个尺度创建独立的Linear层
+        self.shared_patch_embed = nn.Conv2d(
+            channels, channels, kernel_size=1, stride=1, padding=0
+        )
         
         # 稀疏多头注意力
         self.multihead_attn = nn.MultiheadAttention(
@@ -330,15 +401,9 @@ class MultiScaleSparseTransformerBlock(nn.Module):
             batch_first=True
         )
         
-        # 输出投影
+        # 输出投影 - 使用瓶颈MLP替代原来的大型MLP
         self.norm_out = nn.LayerNorm(channels)
-        self.mlp = nn.Sequential(
-            nn.Linear(channels, channels * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(channels * 4, channels),
-            nn.Dropout(dropout)
-        )
+        self.mlp = BottleneckMLP(channels, bottleneck_ratio=bottleneck_ratio, dropout=dropout)
         
     def create_sparse_mask(self, seq_len, sparsity_ratio=0.9):
         """
@@ -364,23 +429,24 @@ class MultiScaleSparseTransformerBlock(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         
+        # 使用共享的卷积投影层处理输入特征
+        x_projected = self.shared_patch_embed(x)  # B, C, H, W
+        
         # 局部信息：直接展平
-        x_flat = x.view(B, C, -1).transpose(1, 2)  # B, HW, C
-        # 移除位置嵌入，直接使用LayerNorm
+        x_flat = x_projected.view(B, C, -1).transpose(1, 2)  # B, HW, C
         local_features = self.local_norm(x_flat)  # B, HW, C
         
-        # 区域信息：多尺度块划分
+        # 区域信息：多尺度块划分，但使用相同的投影特征
         regional_features = []
         for i, patch_size in enumerate(self.patch_sizes[1:]):
             if H % patch_size == 0 and W % patch_size == 0:
-                # 重塑为块
-                x_patches = x.view(B, C, H//patch_size, patch_size, W//patch_size, patch_size)
+                # 对投影后的特征进行块划分
+                x_patches = x_projected.view(B, C, H//patch_size, patch_size, W//patch_size, patch_size)
                 x_patches = x_patches.permute(0, 2, 4, 1, 3, 5).contiguous()
-                x_patches = x_patches.view(B, (H//patch_size)*(W//patch_size), C*patch_size*patch_size)
+                # 平均池化来聚合patch内的信息，而不是展平后线性投影
+                x_patches = x_patches.mean(dim=(4, 5))  # B, H//patch_size, W//patch_size, C
+                x_patches = x_patches.view(B, -1, C)  # B, (H//patch_size)*(W//patch_size), C
                 
-                # 使用预先创建的投影层进行维度调整
-                x_patches = self.patch_projections[i](x_patches)
-                # 移除位置嵌入，直接使用LayerNorm
                 x_patches = self.regional_norms[i](x_patches)
                 regional_features.append(x_patches)
         
@@ -403,7 +469,7 @@ class MultiScaleSparseTransformerBlock(nn.Module):
         # 只取局部特征部分用于输出
         local_out = attn_out[:, :H*W, :]
         
-        # MLP和残差连接
+        # 瓶颈MLP和残差连接
         local_out = local_out + self.mlp(self.norm_out(local_out))
         
         # 重塑回原始形状
@@ -412,13 +478,14 @@ class MultiScaleSparseTransformerBlock(nn.Module):
         return output + x  # 残差连接
 
 
-# 新增：混合CNN-Transformer块
-class HybridCNNTransformerBlock(TimestepBlock):
+# 新增：混合CNN-Transformer块 - V2版本
+class HybridCNNTransformerBlockV2(TimestepBlock):
     """
-    混合CNN-Transformer块，结合CNN的局部建模和Transformer的长距离依赖建模
+    混合CNN-Transformer块，结合CNN的局部建模和Transformer的长距离依赖建模 - V2版本
+    使用瓶颈MLP结构进一步优化参数量
     """
     
-    def __init__(self, channels, emb_channels, dropout=0.1, use_checkpoint=False):
+    def __init__(self, channels, emb_channels, dropout=0.1, use_checkpoint=False, bottleneck_ratio=0.25):
         super().__init__()
         self.channels = channels
         self.emb_channels = emb_channels
@@ -434,10 +501,11 @@ class HybridCNNTransformerBlock(TimestepBlock):
             conv_nd(2, channels, channels, 3, padding=1)
         )
         
-        # Transformer分支（使用MSTB）
-        self.transformer_branch = MultiScaleSparseTransformerBlock(
+        # Transformer分支（使用V2版本MSTB）
+        self.transformer_branch = MultiScaleSparseTransformerBlockV2(
             channels=channels,
-            dropout=dropout
+            dropout=dropout,
+            bottleneck_ratio=bottleneck_ratio
         )
         
         # 时间步嵌入
@@ -446,41 +514,71 @@ class HybridCNNTransformerBlock(TimestepBlock):
             linear(emb_channels, channels),
         )
         
-        # 特征融合
-        self.fusion_conv = conv_nd(2, channels * 2, channels, 1)
+        # 特征融合 - 使用1x1卷积而不是2倍通道的卷积
+        self.fusion_conv = conv_nd(2, channels, channels, 1)
         
     def forward(self, x, emb):
+        """
+        Apply the block to a Tensor, conditioned on a timestep embedding.
+        """
+        if self.use_checkpoint:
+            return checkpoint(self._forward, (x, emb), self.parameters(), True)
+        else:
+            return self._forward(x, emb)
+            
+    def _forward(self, x, emb):
         # 时间步嵌入
         emb_out = self.emb_layers(emb).type(x.dtype)
         while len(emb_out.shape) < len(x.shape):
             emb_out = emb_out[..., None]
-            
-        # 添加时间步嵌入
-        x_with_emb = x + emb_out
-            
+        
         # CNN分支
-        conv_out = self.conv_branch(x_with_emb)
+        conv_out = self.conv_branch(x + emb_out)
         
         # Transformer分支
-        trans_out = self.transformer_branch(x_with_emb)
+        trans_out = self.transformer_branch(x + emb_out)
         
-        # 确保两个分支输出维度一致
-        assert conv_out.shape == trans_out.shape, f"CNN output shape {conv_out.shape} != Transformer output shape {trans_out.shape}"
-        
-        # 特征融合
-        fused = th.cat([conv_out, trans_out], dim=1)
+        # 特征融合：加权平均而不是拼接
+        fused = (conv_out + trans_out) / 2
         output = self.fusion_conv(fused)
         
-        # 残差连接
-        return output + x
+        return output + x  # 残差连接
 
 
-# 异构UNet模型
-class HAEUNetModel(nn.Module):
+class HAEUNetModelV2(nn.Module):
     """
-    异构自动编码器UNet模型
-    编码器：传统CNN
-    解码器：混合CNN-Transformer网络
+    The full UNet model with attention and timestep embedding.
+    HAE (Heterogeneous AutoEncoder) UNet Model - V2 Version
+    在Lite版本基础上，使用瓶颈MLP结构进一步减少参数量
+
+    :param image_size: the size of the input images.
+    :param in_channels: the number of channels in the input Tensor.
+    :param model_channels: base channel count for the model.
+    :param out_channels: the number of channels in the output Tensor.
+    :param num_res_blocks: number of residual blocks per downsample.
+    :param attention_resolutions: a collection of downsample rates at which
+        attention will take place. May be a set, list, or tuple.
+        For example, if this contains 4, then at 4x downsampling, attention
+        will be used.
+    :param dropout: the dropout probability.
+    :param channel_mult: channel multiplier for each level of the UNet.
+    :param conv_resample: if True, use learned convolutions for upsampling and
+        downsampling.
+    :param dims: determines if the signal is 1D, 2D, or 3D.
+    :param num_classes: if specified (as an int), then this model will be
+        class-conditional with `num_classes` classes.
+    :param use_checkpoint: use gradient checkpointing to reduce memory usage.
+    :param num_heads: the number of attention heads in each attention layer.
+    :param num_heads_channels: if specified, ignore num_heads and instead use
+                               a fixed channel width per attention head.
+    :param num_heads_upsample: works with num_heads to set a different number
+                               of heads for upsampling. Deprecated.
+    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
+    :param resblock_updown: use residual blocks for up/downsampling.
+    :param use_new_attention_order: use a different attention pattern for potentially
+                                    increased efficiency.
+    :param clf_free: whether to use classifier-free guidance.
+    :param use_hae: whether to use heterogeneous autoencoder blocks.
     """
 
     def __init__(
@@ -506,13 +604,15 @@ class HAEUNetModel(nn.Module):
         use_new_attention_order=False,
         clf_free=True,
         use_hae=True,  # Enable/disable heterogeneous autoencoder
+        bottleneck_ratio=0.25,  # V2新增：瓶颈比例
     ):
         super().__init__()
 
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
 
-        self.in_channels = in_channels 
+        self.image_size = image_size
+        self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels
         self.num_res_blocks = num_res_blocks
@@ -526,31 +626,23 @@ class HAEUNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+        self.clf_free = clf_free
         self.use_hae = use_hae
+        self.bottleneck_ratio = bottleneck_ratio  # V2新增
 
         time_embed_dim = model_channels * 4
-        encoder_channels = time_embed_dim
-
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
 
-        if self.num_classes is not None and clf_free:
-            self.label_emb = nn.Embedding(self.num_classes, model_channels)
-            self.class_emb = nn.Sequential(
-                linear(model_channels, time_embed_dim),
-                nn.SiLU(),
-                linear(time_embed_dim, time_embed_dim),
-            )
-        elif self.num_classes is not None and not clf_free:
-            self.label_emb = nn.Embedding(self.num_classes, time_embed_dim)
+        if self.num_classes is not None:
+            self.label_emb = nn.Embedding(num_classes, time_embed_dim)
 
-        # 编码器：传统CNN架构
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
-            [TimestepEmbedSequential(conv_nd(dims, self.in_channels, ch, 3, padding=1))]
+            [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
         )
         self._feature_size = ch
         input_block_chans = [ch]
@@ -570,15 +662,27 @@ class HAEUNetModel(nn.Module):
                 ]
                 ch = int(mult * model_channels)
                 if ds in attention_resolutions:
-                    layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads,
-                            num_head_channels=num_head_channels,
-                            encoder_channels=encoder_channels,
+                    if use_hae:
+                        # 使用HAE V2混合块
+                        layers.append(
+                            HybridCNNTransformerBlockV2(
+                                ch,
+                                time_embed_dim,
+                                dropout=dropout,
+                                use_checkpoint=use_checkpoint,
+                                bottleneck_ratio=bottleneck_ratio
+                            )
                         )
-                    )
+                    else:
+                        layers.append(
+                            AttentionBlock(
+                                ch,
+                                use_checkpoint=use_checkpoint,
+                                num_heads=num_heads,
+                                num_head_channels=num_head_channels,
+                                encoder_channels=None,
+                            )
+                        )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
                 input_block_chans.append(ch)
@@ -597,7 +701,9 @@ class HAEUNetModel(nn.Module):
                             down=True,
                         )
                         if resblock_updown
-                        else Downsample(ch, conv_resample, dims=dims, out_channels=out_ch)
+                        else Downsample(
+                            ch, conv_resample, dims=dims, out_channels=out_ch
+                        )
                     )
                 )
                 ch = out_ch
@@ -605,7 +711,6 @@ class HAEUNetModel(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
-        # 中间块：保持原有设计
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -615,12 +720,18 @@ class HAEUNetModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
             ),
-            AttentionBlock(
+            HybridCNNTransformerBlockV2(
+                ch,
+                time_embed_dim,
+                dropout=dropout,
+                use_checkpoint=use_checkpoint,
+                bottleneck_ratio=bottleneck_ratio
+            ) if use_hae else AttentionBlock(
                 ch,
                 use_checkpoint=use_checkpoint,
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
-                encoder_channels=encoder_channels,
+                encoder_channels=None,
             ),
             ResBlock(
                 ch,
@@ -633,7 +744,6 @@ class HAEUNetModel(nn.Module):
         )
         self._feature_size += ch
 
-        # 解码器：混合CNN-Transformer架构
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
@@ -650,18 +760,28 @@ class HAEUNetModel(nn.Module):
                     )
                 ]
                 ch = int(model_channels * mult)
-                
-                # 在解码器中使用混合CNN-Transformer块
                 if ds in attention_resolutions:
-                    layers.append(
-                        HybridCNNTransformerBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout=dropout,
-                            use_checkpoint=use_checkpoint,
+                    if use_hae:
+                        # 使用HAE V2混合块
+                        layers.append(
+                            HybridCNNTransformerBlockV2(
+                                ch,
+                                time_embed_dim,
+                                dropout=dropout,
+                                use_checkpoint=use_checkpoint,
+                                bottleneck_ratio=bottleneck_ratio
+                            )
                         )
-                    )
-                    
+                    else:
+                        layers.append(
+                            AttentionBlock(
+                                ch,
+                                use_checkpoint=use_checkpoint,
+                                num_heads=num_heads_upsample,
+                                num_head_channels=num_head_channels,
+                                encoder_channels=None,
+                            )
+                        )
                 if level and i == num_res_blocks:
                     out_ch = ch
                     layers.append(
@@ -683,11 +803,10 @@ class HAEUNetModel(nn.Module):
                 self._feature_size += ch
 
         self.out = nn.Sequential(
-            normalization(ch, swish=1.0),
-            nn.Identity(),
+            normalization(ch),
+            nn.SiLU(),
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
-        self.use_fp16 = use_fp16
 
     def convert_to_fp16(self):
         """
@@ -708,46 +827,30 @@ class HAEUNetModel(nn.Module):
     def forward(self, x, timesteps, y=None, threshold=-1, null=False, clf_free=False):
         """
         Apply the model to an input batch.
+
+        :param x: an [N x C x ...] Tensor of inputs.
+        :param timesteps: a 1-D batch of timesteps.
+        :param y: an [N] Tensor of labels, if class-conditional.
+        :return: an [N x C x ...] Tensor of outputs.
         """
+        assert (y is not None) == (
+            self.num_classes is not None
+        ), "must specify y if and only if the model is class-conditional"
+
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-        cemb_mm = None
-        
-        # 条件设置（与原版保持一致）
-        if self.num_classes is not None:
-            cemb = None
-            if threshold != -1: 
-                assert threshold > 0
-                cemb = self.class_emb(self.label_emb(y))
-                mask = th.rand(cemb.shape[0])<threshold
-                cemb[np.where(mask)[0]] = 0
-                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb)
-            elif threshold == -1 and clf_free: 
-                if null:
-                    cemb = th.zeros_like(emb)
-                else:
-                    cemb = self.class_emb(self.label_emb(y)) 
-                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb) 
-            else:
-                raise Exception("Invalid condition setup")
-                
-            assert cemb is not None
-            assert cemb_mm is not None
-            emb = emb + cemb 
 
-        # 编码器前向传播
+        if self.num_classes is not None:
+            assert y.shape == (x.shape[0],)
+            emb = emb + self.label_emb(y)
+
         h = x.type(self.dtype)
         for module in self.input_blocks:
-            h = module(h, emb, cemb_mm)
+            h = module(h, emb)
             hs.append(h)
-            
-        # 中间块
-        h = self.middle_block(h, emb, cemb_mm)
-        
-        # 解码器前向传播（使用混合CNN-Transformer）
+        h = self.middle_block(h, emb)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, cemb_mm)
-            
+            h = module(h, emb)
         h = h.type(x.dtype)
         return self.out(h)

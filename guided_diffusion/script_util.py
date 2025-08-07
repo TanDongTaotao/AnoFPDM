@@ -255,6 +255,10 @@ def create_model(
         from .unet_bottleneck_bea import BottleneckBEAUNetModel as UNetModel
     elif unet_ver == "hae":
         from .unet_hae import HAEUNetModel as UNetModel
+    elif unet_ver == "hae_lite":
+        from .unet_hae_lite import HAEUNetModelLite as UNetModel
+    elif unet_ver == "hae_v2":
+        from .unet_hae_v2 import HAEUNetModelV2 as UNetModel
     else:
         raise ValueError(f"unsupported unet version: {unet_ver}")
     
@@ -291,6 +295,10 @@ def create_model(
     elif unet_ver == "bottleneck_bea":
         model_kwargs["use_bottleneck_bea"] = use_bottleneck_bea
     elif unet_ver == "hae":
+        model_kwargs["use_hae"] = use_hae
+    elif unet_ver == "hae_lite":
+        model_kwargs["use_hae"] = use_hae
+    elif unet_ver == "hae_v2":
         model_kwargs["use_hae"] = use_hae
     
     return UNetModel(**model_kwargs)
