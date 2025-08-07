@@ -1,0 +1,29 @@
+
+# HAE V2 内存优化补丁
+# 在unet_hae_v2.py的forward方法中替换cemb_mm计算部分
+
+# 原始代码:
+# cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb)
+
+# 优化代码:
+if th.allclose(cemb, th.zeros_like(cemb)):
+    cemb_mm = None  # 零张量不需要计算cemb_mm
+else:
+    # 方案1: 条件计算 (推荐)
+    cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb)
+    
+    # 方案2: 低秩分解 (如果内存仍然不足)
+    # rank = 64
+    # U, S, V = th.svd(cemb)
+    # cemb_reduced = U[:, :rank] @ th.diag(S[:rank]) @ V[:, :rank].T
+    # cemb_mm = th.einsum("ab,ac -> abc", cemb_reduced, cemb_reduced)
+    
+    # 方案3: 分块计算 (如果batch_size很大)
+    # chunk_size = 8
+    # cemb_mm_chunks = []
+    # for i in range(0, cemb.shape[0], chunk_size):
+    #     end_idx = min(i + chunk_size, cemb.shape[0])
+    #     cemb_chunk = cemb[i:end_idx]
+    #     cemb_mm_chunk = th.einsum("ab,ac -> abc", cemb_chunk, cemb_chunk)
+    #     cemb_mm_chunks.append(cemb_mm_chunk)
+    # cemb_mm = th.cat(cemb_mm_chunks, dim=0)

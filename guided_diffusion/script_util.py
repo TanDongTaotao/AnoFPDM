@@ -263,6 +263,8 @@ def create_model(
         from .unet_hae_lite import HAEUNetModelLite as UNetModel
     elif unet_ver == "hae_v2":
         from .unet_hae_v2 import HAEUNetModelV2 as UNetModel
+    elif unet_ver == "hae_v2_conservative":
+        from .unet_hae_v2_conservative import HAEUNetModelV2Conservative as UNetModel
     else:
         raise ValueError(f"unsupported unet version: {unet_ver}")
     
@@ -303,6 +305,9 @@ def create_model(
     elif unet_ver == "hae_lite":
         model_kwargs["use_hae"] = use_hae
     elif unet_ver == "hae_v2":
+        model_kwargs["use_hae"] = use_hae
+        model_kwargs["bottleneck_ratio"] = bottleneck_ratio
+    elif unet_ver == "hae_v2_conservative":
         model_kwargs["use_hae"] = use_hae
         model_kwargs["bottleneck_ratio"] = bottleneck_ratio
     
