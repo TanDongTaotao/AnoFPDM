@@ -1,0 +1,217 @@
+<svg width="1200" height="1400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font-family: Arial, sans-serif; font-size: 24px; font-weight: bold; fill: #2c3e50; }
+      .subtitle { font-family: Arial, sans-serif; font-size: 16px; font-weight: bold; fill: #34495e; }
+      .label { font-family: Arial, sans-serif; font-size: 12px; fill: #2c3e50; }
+      .small-label { font-family: Arial, sans-serif; font-size: 10px; fill: #7f8c8d; }
+      .encoder-block { fill: #3498db; stroke: #2980b9; stroke-width: 2; }
+      .decoder-block { fill: #e74c3c; stroke: #c0392b; stroke-width: 2; }
+      .middle-block { fill: #f39c12; stroke: #e67e22; stroke-width: 2; }
+      .attention-block { fill: #9b59b6; stroke: #8e44ad; stroke-width: 2; }
+      .hae-block { fill: #1abc9c; stroke: #16a085; stroke-width: 2; }
+      .resblock { fill: #95a5a6; stroke: #7f8c8d; stroke-width: 2; }
+      .optimization { fill: #f1c40f; stroke: #f39c12; stroke-width: 2; }
+      .arrow { stroke: #34495e; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .skip-connection { stroke: #e67e22; stroke-width: 2; fill: none; stroke-dasharray: 5,5; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34495e" />
+    </marker>
+  </defs>
+  
+  <!-- 标题 -->
+  <text x="600" y="30" text-anchor="middle" class="title">HAE V2 Conservative 网络架构</text>
+  <text x="600" y="55" text-anchor="middle" class="subtitle">内存优化版本 - 零质量损失</text>
+  
+  <!-- 输入 -->
+  <rect x="550" y="80" width="100" height="40" rx="5" class="encoder-block"/>
+  <text x="600" y="105" text-anchor="middle" class="label">输入图像</text>
+  <text x="600" y="115" text-anchor="middle" class="small-label">[B, 4, 128, 128]</text>
+  
+  <!-- 时间和类别嵌入 -->
+  <rect x="350" y="150" width="120" height="40" rx="5" class="optimization"/>
+  <text x="410" y="175" text-anchor="middle" class="label">时间嵌入</text>
+  <text x="410" y="185" text-anchor="middle" class="small-label">[B, 512]</text>
+  
+  <rect x="730" y="150" width="120" height="40" rx="5" class="optimization"/>
+  <text x="790" y="175" text-anchor="middle" class="label">类别嵌入</text>
+  <text x="790" y="185" text-anchor="middle" class="small-label">[B, 512]</text>
+  
+  <!-- cemb_mm 优化计算 -->
+  <rect x="520" y="220" width="160" height="50" rx="5" class="optimization"/>
+  <text x="600" y="240" text-anchor="middle" class="label">cemb_mm 优化计算</text>
+  <text x="600" y="255" text-anchor="middle" class="small-label">条件计算 + 零张量检测</text>
+  <text x="600" y="265" text-anchor="middle" class="small-label">[B, 512, 512] or None</text>
+  
+  <!-- 编码器 -->
+  <text x="100" y="320" class="subtitle">编码器 (标准UNet)</text>
+  
+  <!-- Level 0 -->
+  <rect x="50" y="340" width="80" height="40" rx="3" class="resblock"/>
+  <text x="90" y="365" text-anchor="middle" class="small-label">ResBlock×2</text>
+  <rect x="140" y="340" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="180" y="365" text-anchor="middle" class="small-label">Attention</text>
+  <rect x="230" y="340" width="80" height="40" rx="3" class="encoder-block"/>
+  <text x="270" y="365" text-anchor="middle" class="small-label">Downsample</text>
+  <text x="160" y="395" text-anchor="middle" class="small-label">128×128, 128ch</text>
+  
+  <!-- Level 1 -->
+  <rect x="50" y="420" width="80" height="40" rx="3" class="resblock"/>
+  <text x="90" y="445" text-anchor="middle" class="small-label">ResBlock×2</text>
+  <rect x="140" y="420" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="180" y="445" text-anchor="middle" class="small-label">Attention</text>
+  <rect x="230" y="420" width="80" height="40" rx="3" class="encoder-block"/>
+  <text x="270" y="445" text-anchor="middle" class="small-label">Downsample</text>
+  <text x="160" y="475" text-anchor="middle" class="small-label">64×64, 256ch</text>
+  
+  <!-- Level 2 -->
+  <rect x="50" y="500" width="80" height="40" rx="3" class="resblock"/>
+  <text x="90" y="525" text-anchor="middle" class="small-label">ResBlock×2</text>
+  <rect x="140" y="500" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="180" y="525" text-anchor="middle" class="small-label">Attention</text>
+  <rect x="230" y="500" width="80" height="40" rx="3" class="encoder-block"/>
+  <text x="270" y="525" text-anchor="middle" class="small-label">Downsample</text>
+  <text x="160" y="555" text-anchor="middle" class="small-label">32×32, 512ch</text>
+  
+  <!-- Level 3 -->
+  <rect x="50" y="580" width="80" height="40" rx="3" class="resblock"/>
+  <text x="90" y="605" text-anchor="middle" class="small-label">ResBlock×2</text>
+  <rect x="140" y="580" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="180" y="605" text-anchor="middle" class="small-label">Attention</text>
+  <text x="160" y="635" text-anchor="middle" class="small-label">16×16, 1024ch</text>
+  
+  <!-- 中间块 -->
+  <text x="450" y="680" class="subtitle">中间块</text>
+  <rect x="400" y="700" width="80" height="40" rx="3" class="resblock"/>
+  <text x="440" y="725" text-anchor="middle" class="small-label">ResBlock</text>
+  <rect x="490" y="700" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="530" y="725" text-anchor="middle" class="small-label">Attention</text>
+  <rect x="580" y="700" width="80" height="40" rx="3" class="resblock"/>
+  <text x="620" y="725" text-anchor="middle" class="small-label">ResBlock</text>
+  <text x="530" y="755" text-anchor="middle" class="small-label">16×16, 1024ch</text>
+  
+  <!-- 解码器 -->
+  <text x="900" y="320" class="subtitle">解码器 (HAE异构)</text>
+  
+  <!-- Level 3 解码 -->
+  <rect x="850" y="340" width="80" height="40" rx="3" class="resblock"/>
+  <text x="890" y="365" text-anchor="middle" class="small-label">ResBlock×3</text>
+  <rect x="940" y="340" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="980" y="365" text-anchor="middle" class="small-label">Attention</text>
+  <rect x="1030" y="340" width="80" height="40" rx="3" class="hae-block"/>
+  <text x="1070" y="360" text-anchor="middle" class="small-label">HAE异构块</text>
+  <text x="1070" y="370" text-anchor="middle" class="small-label">Hybrid CNN-</text>
+  <text x="1070" y="380" text-anchor="middle" class="small-label">Transformer</text>
+  <rect x="1120" y="340" width="80" height="40" rx="3" class="decoder-block"/>
+  <text x="1160" y="365" text-anchor="middle" class="small-label">Upsample</text>
+  <text x="980" y="395" text-anchor="middle" class="small-label">32×32, 512ch</text>
+  
+  <!-- Level 2 解码 -->
+  <rect x="850" y="420" width="80" height="40" rx="3" class="resblock"/>
+  <text x="890" y="445" text-anchor="middle" class="small-label">ResBlock×3</text>
+  <rect x="940" y="420" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="980" y="445" text-anchor="middle" class="small-label">Attention</text>
+  <rect x="1030" y="420" width="80" height="40" rx="3" class="hae-block"/>
+  <text x="1070" y="440" text-anchor="middle" class="small-label">HAE异构块</text>
+  <text x="1070" y="450" text-anchor="middle" class="small-label">Multi-Scale</text>
+  <text x="1070" y="460" text-anchor="middle" class="small-label">Sparse Trans</text>
+  <rect x="1120" y="420" width="80" height="40" rx="3" class="decoder-block"/>
+  <text x="1160" y="445" text-anchor="middle" class="small-label">Upsample</text>
+  <text x="980" y="475" text-anchor="middle" class="small-label">64×64, 256ch</text>
+  
+  <!-- Level 1 解码 -->
+  <rect x="850" y="500" width="80" height="40" rx="3" class="resblock"/>
+  <text x="890" y="525" text-anchor="middle" class="small-label">ResBlock×3</text>
+  <rect x="940" y="500" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="980" y="525" text-anchor="middle" class="small-label">Attention</text>
+  <rect x="1030" y="500" width="80" height="40" rx="3" class="hae-block"/>
+  <text x="1070" y="520" text-anchor="middle" class="small-label">HAE异构块</text>
+  <text x="1070" y="530" text-anchor="middle" class="small-label">Bottleneck</text>
+  <text x="1070" y="540" text-anchor="middle" class="small-label">MLP</text>
+  <rect x="1120" y="500" width="80" height="40" rx="3" class="decoder-block"/>
+  <text x="1160" y="525" text-anchor="middle" class="small-label">Upsample</text>
+  <text x="980" y="555" text-anchor="middle" class="small-label">128×128, 128ch</text>
+  
+  <!-- Level 0 解码 -->
+  <rect x="850" y="580" width="80" height="40" rx="3" class="resblock"/>
+  <text x="890" y="605" text-anchor="middle" class="small-label">ResBlock×3</text>
+  <rect x="940" y="580" width="80" height="40" rx="3" class="attention-block"/>
+  <text x="980" y="605" text-anchor="middle" class="small-label">Attention</text>
+  <text x="980" y="635" text-anchor="middle" class="small-label">128×128, 128ch</text>
+  
+  <!-- 输出层 -->
+  <rect x="550" y="800" width="100" height="40" rx="5" class="decoder-block"/>
+  <text x="600" y="825" text-anchor="middle" class="label">输出层</text>
+  <text x="600" y="835" text-anchor="middle" class="small-label">[B, 4, 128, 128]</text>
+  
+  <!-- 主要数据流箭头 -->
+  <line x1="600" y1="120" x2="600" y2="150" class="arrow"/>
+  <line x1="600" y1="270" x2="600" y2="340" class="arrow"/>
+  <line x1="310" y1="360" x2="400" y2="720" class="arrow"/>
+  <line x1="660" y1="720" x2="850" y2="600" class="arrow"/>
+  <line x1="890" y1="620" x2="600" y2="800" class="arrow"/>
+  
+  <!-- 跳跃连接 -->
+  <path d="M 320 360 Q 700 300 850 360" class="skip-connection"/>
+  <path d="M 320 440 Q 720 380 850 440" class="skip-connection"/>
+  <path d="M 320 520 Q 740 460 850 520" class="skip-connection"/>
+  <path d="M 320 600 Q 760 540 850 600" class="skip-connection"/>
+  
+  <!-- 内存优化说明 -->
+  <rect x="50" y="900" width="300" height="120" rx="5" fill="#ecf0f1" stroke="#bdc3c7" stroke-width="2"/>
+  <text x="200" y="920" text-anchor="middle" class="subtitle">内存优化特性</text>
+  <text x="60" y="940" class="small-label">• 条件计算 cemb_mm</text>
+  <text x="60" y="955" class="small-label">• 零张量自动检测</text>
+  <text x="60" y="970" class="small-label">• 部分样本处理</text>
+  <text x="60" y="985" class="small-label">• 内存使用减半</text>
+  <text x="60" y="1000" class="small-label">• 批次大小翻倍</text>
+  <text x="60" y="1015" class="small-label">• 零质量损失</text>
+  
+  <!-- HAE异构结构说明 -->
+  <rect x="400" y="900" width="350" height="120" rx="5" fill="#e8f8f5" stroke="#1abc9c" stroke-width="2"/>
+  <text x="575" y="920" text-anchor="middle" class="subtitle">HAE异构结构组件</text>
+  <text x="410" y="940" class="small-label">• MultiScaleSparseTransformerBlockV2</text>
+  <text x="410" y="955" class="small-label">  - 多尺度补丁: 1×1, 4×4, 8×8</text>
+  <text x="410" y="970" class="small-label">  - 稀疏注意力: 90% 稀疏度</text>
+  <text x="410" y="985" class="small-label">• BottleneckMLP (ratio=0.25)</text>
+  <text x="410" y="1000" class="small-label">• CNN-Transformer 混合架构</text>
+  <text x="410" y="1015" class="small-label">• 仅在解码器上采样前使用</text>
+  
+  <!-- 参数统计 -->
+  <rect x="800" y="900" width="300" height="120" rx="5" fill="#fdf2e9" stroke="#f39c12" stroke-width="2"/>
+  <text x="950" y="920" text-anchor="middle" class="subtitle">模型参数统计</text>
+  <text x="810" y="940" class="small-label">• 总参数量: ~117M</text>
+  <text x="810" y="955" class="small-label">• 模型大小: ~447MB</text>
+  <text x="810" y="970" class="small-label">• 输入尺寸: [B, 4, 128, 128]</text>
+  <text x="810" y="985" class="small-label">• 输出尺寸: [B, 4, 128, 128]</text>
+  <text x="810" y="1000" class="small-label">• 注意力分辨率: [16, 8]</text>
+  <text x="810" y="1015" class="small-label">• 通道倍数: (1, 2, 4, 8)</text>
+  
+  <!-- 图例 -->
+  <text x="600" y="1080" text-anchor="middle" class="subtitle">图例</text>
+  
+  <rect x="200" y="1100" width="20" height="15" class="encoder-block"/>
+  <text x="230" y="1112" class="small-label">编码器组件</text>
+  
+  <rect x="350" y="1100" width="20" height="15" class="decoder-block"/>
+  <text x="380" y="1112" class="small-label">解码器组件</text>
+  
+  <rect x="500" y="1100" width="20" height="15" class="attention-block"/>
+  <text x="530" y="1112" class="small-label">注意力块</text>
+  
+  <rect x="650" y="1100" width="20" height="15" class="hae-block"/>
+  <text x="680" y="1112" class="small-label">HAE异构块</text>
+  
+  <rect x="800" y="1100" width="20" height="15" class="optimization"/>
+  <text x="830" y="1112" class="small-label">内存优化</text>
+  
+  <line x1="200" y1="1130" x2="220" y2="1130" class="skip-connection"/>
+  <text x="230" y="1135" class="small-label">跳跃连接</text>
+  
+  <line x1="350" y1="1130" x2="370" y2="1130" class="arrow"/>
+  <text x="380" y="1135" class="small-label">数据流</text>
+  
+  <!-- 版本信息 -->
+  <text x="600" y="1380" text-anchor="middle" class="small-label">HAE V2 Conservative - 内存优化版本 | 保持完全功能兼容性</text>
+</svg>

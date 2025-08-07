@@ -284,7 +284,7 @@ class AttentionBlock(nn.Module):
             ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
-        self.norm = normalization(channels)
+        self.norm = normalization(channels, swish=0.0)
         self.qkv = conv_nd(1, channels, channels * 3, 1)
         if encoder_channels is not None:
             self.encoder_kv = conv_nd(1, encoder_channels, channels * 2, 1)
@@ -292,15 +292,18 @@ class AttentionBlock(nn.Module):
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x, cemb_mm=None):
-        return checkpoint(self._forward, (x, cemb_mm), self.parameters(), self.use_checkpoint)
+        if self.use_checkpoint:
+            return checkpoint(self._forward, (x, cemb_mm), self.parameters(), True)
+        else:
+            return self._forward(x, cemb_mm)
 
     def _forward(self, x, cemb_mm):
         b, c, *spatial = x.shape
         x = x.reshape(b, c, -1)
         qkv = self.qkv(self.norm(x))
         if cemb_mm is not None:
-            encoder_kv = cemb_mm.reshape(b, -1, 1)
-            h = self.attention(qkv, encoder_kv)
+            encoder_out = self.encoder_kv(cemb_mm)
+            h = self.attention(qkv, encoder_out)
         else:
             h = self.attention(qkv)
         h = self.proj_out(h)
@@ -328,7 +331,7 @@ class QKVAttention(nn.Module):
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
         if encoder_kv is not None:
-            assert encoder_kv.shape[1] % (2 * self.n_heads) == 0
+            assert encoder_kv.shape[1] == self.n_heads * ch * 2
             ek, ev = encoder_kv.reshape(bs * self.n_heads, ch * 2, -1).split(ch, dim=1)
             k = th.cat([ek, k], dim=-1)
             v = th.cat([ev, v], dim=-1)
