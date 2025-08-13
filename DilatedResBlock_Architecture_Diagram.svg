@@ -1,0 +1,165 @@
+<svg width="800" height="1000" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font-family: Arial, sans-serif; font-size: 18px; font-weight: bold; fill: #2c3e50; }
+      .subtitle { font-family: Arial, sans-serif; font-size: 14px; font-weight: bold; fill: #34495e; }
+      .text { font-family: Arial, sans-serif; font-size: 12px; fill: #2c3e50; }
+      .small-text { font-family: Arial, sans-serif; font-size: 10px; fill: #7f8c8d; }
+      .box { fill: #ecf0f1; stroke: #34495e; stroke-width: 2; }
+      .input-box { fill: #3498db; stroke: #2980b9; stroke-width: 2; }
+      .process-box { fill: #e74c3c; stroke: #c0392b; stroke-width: 2; }
+      .dilated-box { fill: #f39c12; stroke: #e67e22; stroke-width: 2; }
+      .fusion-box { fill: #27ae60; stroke: #229954; stroke-width: 2; }
+      .output-box { fill: #9b59b6; stroke: #8e44ad; stroke-width: 2; }
+      .arrow { stroke: #2c3e50; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .dashed-arrow { stroke: #7f8c8d; stroke-width: 1; fill: none; stroke-dasharray: 5,5; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2c3e50" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" class="title">DilatedResBlock 架构详细图</text>
+  
+  <!-- Input -->
+  <rect x="350" y="60" width="100" height="40" class="input-box" rx="5"/>
+  <text x="400" y="78" text-anchor="middle" class="text" fill="white">输入 x</text>
+  <text x="400" y="92" text-anchor="middle" class="small-text" fill="white">(B, C, H, W)</text>
+  
+  <!-- Time Embedding Branch -->
+  <rect x="50" y="140" width="120" height="60" class="process-box" rx="5"/>
+  <text x="110" y="158" text-anchor="middle" class="text" fill="white">时间步嵌入处理</text>
+  <text x="110" y="172" text-anchor="middle" class="small-text" fill="white">emb_layers</text>
+  <text x="110" y="186" text-anchor="middle" class="small-text" fill="white">(Linear+SiLU+Linear)</text>
+  
+  <!-- Main Feature Processing -->
+  <rect x="350" y="140" width="100" height="60" class="process-box" rx="5"/>
+  <text x="400" y="158" text-anchor="middle" class="text" fill="white">主要特征处理</text>
+  <text x="400" y="172" text-anchor="middle" class="small-text" fill="white">in_layers</text>
+  <text x="400" y="186" text-anchor="middle" class="small-text" fill="white">(GroupNorm+SiLU+Conv)</text>
+  
+  <!-- Add Time Embedding -->
+  <rect x="350" y="240" width="100" height="40" class="box" rx="5"/>
+  <text x="400" y="258" text-anchor="middle" class="text">添加时间步嵌入</text>
+  <text x="400" y="272" text-anchor="middle" class="small-text">h + emb_out</text>
+  
+  <!-- Parallel Dilated Convolutions -->
+  <text x="400" y="320" text-anchor="middle" class="subtitle">并行膨胀卷积分支</text>
+  
+  <!-- Branch 1: Dilation=2 -->
+  <rect x="150" y="340" width="120" height="80" class="dilated-box" rx="5"/>
+  <text x="210" y="358" text-anchor="middle" class="text">分支1</text>
+  <text x="210" y="372" text-anchor="middle" class="text">Conv3x3</text>
+  <text x="210" y="386" text-anchor="middle" class="text">dilation=2</text>
+  <text x="210" y="400" text-anchor="middle" class="small-text">感受野: 5×5</text>
+  <text x="210" y="414" text-anchor="middle" class="small-text">(B, C, H, W)</text>
+  
+  <!-- Branch 2: Dilation=4 -->
+  <rect x="340" y="340" width="120" height="80" class="dilated-box" rx="5"/>
+  <text x="400" y="358" text-anchor="middle" class="text">分支2</text>
+  <text x="400" y="372" text-anchor="middle" class="text">Conv3x3</text>
+  <text x="400" y="386" text-anchor="middle" class="text">dilation=4</text>
+  <text x="400" y="400" text-anchor="middle" class="small-text">感受野: 9×9</text>
+  <text x="400" y="414" text-anchor="middle" class="small-text">(B, C, H, W)</text>
+  
+  <!-- Branch 3: Dilation=8 -->
+  <rect x="530" y="340" width="120" height="80" class="dilated-box" rx="5"/>
+  <text x="590" y="358" text-anchor="middle" class="text">分支3</text>
+  <text x="590" y="372" text-anchor="middle" class="text">Conv3x3</text>
+  <text x="590" y="386" text-anchor="middle" class="text">dilation=8</text>
+  <text x="590" y="400" text-anchor="middle" class="small-text">感受野: 17×17</text>
+  <text x="590" y="414" text-anchor="middle" class="small-text">(B, C, H, W)</text>
+  
+  <!-- Feature Concatenation -->
+  <rect x="320" y="460" width="160" height="40" class="fusion-box" rx="5"/>
+  <text x="400" y="478" text-anchor="middle" class="text" fill="white">特征拼接 (Concatenate)</text>
+  <text x="400" y="492" text-anchor="middle" class="small-text" fill="white">(B, 3*C, H, W)</text>
+  
+  <!-- Fusion Convolution -->
+  <rect x="320" y="540" width="160" height="60" class="fusion-box" rx="5"/>
+  <text x="400" y="558" text-anchor="middle" class="text" fill="white">融合卷积</text>
+  <text x="400" y="572" text-anchor="middle" class="text" fill="white">Conv1x1</text>
+  <text x="400" y="586" text-anchor="middle" class="small-text" fill="white">3*C → C</text>
+  <text x="400" y="594" text-anchor="middle" class="small-text" fill="white">(B, C, H, W)</text>
+  
+  <!-- Dropout -->
+  <rect x="350" y="640" width="100" height="40" class="box" rx="5"/>
+  <text x="400" y="658" text-anchor="middle" class="text">Dropout</text>
+  <text x="400" y="672" text-anchor="middle" class="small-text">(可选)</text>
+  
+  <!-- Residual Connection -->
+  <rect x="350" y="720" width="100" height="40" class="output-box" rx="5"/>
+  <text x="400" y="738" text-anchor="middle" class="text" fill="white">残差连接</text>
+  <text x="400" y="752" text-anchor="middle" class="small-text" fill="white">x + h</text>
+  
+  <!-- Output -->
+  <rect x="350" y="800" width="100" height="40" class="output-box" rx="5"/>
+  <text x="400" y="818" text-anchor="middle" class="text" fill="white">输出</text>
+  <text x="400" y="832" text-anchor="middle" class="small-text" fill="white">(B, C, H, W)</text>
+  
+  <!-- Arrows -->
+  <!-- Main flow -->
+  <line x1="400" y1="100" x2="400" y2="140" class="arrow"/>
+  <line x1="400" y1="200" x2="400" y2="240" class="arrow"/>
+  <line x1="400" y1="280" x2="400" y2="340" class="arrow"/>
+  
+  <!-- Time embedding flow -->
+  <line x1="350" y1="80" x2="110" y2="140" class="dashed-arrow"/>
+  <line x1="170" y1="170" x2="350" y2="260" class="dashed-arrow"/>
+  
+  <!-- Parallel branches to concatenation -->
+  <line x1="210" y1="420" x2="350" y2="460" class="arrow"/>
+  <line x1="400" y1="420" x2="400" y2="460" class="arrow"/>
+  <line x1="590" y1="420" x2="450" y2="460" class="arrow"/>
+  
+  <!-- Concatenation to fusion -->
+  <line x1="400" y1="500" x2="400" y2="540" class="arrow"/>
+  
+  <!-- Fusion to dropout -->
+  <line x1="400" y1="600" x2="400" y2="640" class="arrow"/>
+  
+  <!-- Dropout to residual -->
+  <line x1="400" y1="680" x2="400" y2="720" class="arrow"/>
+  
+  <!-- Residual to output -->
+  <line x1="400" y1="760" x2="400" y2="800" class="arrow"/>
+  
+  <!-- Residual connection (skip connection) -->
+  <path d="M 300 80 Q 250 80 250 740 Q 250 760 350 760" class="dashed-arrow"/>
+  
+  <!-- Receptive Field Comparison -->
+  <text x="50" y="880" class="subtitle">感受野对比:</text>
+  
+  <!-- Standard Conv -->
+  <rect x="50" y="900" width="60" height="60" fill="#bdc3c7" stroke="#95a5a6" stroke-width="1"/>
+  <text x="80" y="920" text-anchor="middle" class="small-text">标准卷积</text>
+  <text x="80" y="935" text-anchor="middle" class="small-text">3×3</text>
+  <rect x="65" y="940" width="30" height="15" fill="#e74c3c"/>
+  
+  <!-- Dilated Conv 2 -->
+  <rect x="150" y="900" width="60" height="60" fill="#bdc3c7" stroke="#95a5a6" stroke-width="1"/>
+  <text x="180" y="920" text-anchor="middle" class="small-text">膨胀=2</text>
+  <text x="180" y="935" text-anchor="middle" class="small-text">5×5</text>
+  <rect x="160" y="940" width="40" height="15" fill="#f39c12"/>
+  
+  <!-- Dilated Conv 4 -->
+  <rect x="250" y="900" width="60" height="60" fill="#bdc3c7" stroke="#95a5a6" stroke-width="1"/>
+  <text x="280" y="920" text-anchor="middle" class="small-text">膨胀=4</text>
+  <text x="280" y="935" text-anchor="middle" class="small-text">9×9</text>
+  <rect x="255" y="940" width="50" height="15" fill="#f39c12"/>
+  
+  <!-- Dilated Conv 8 -->
+  <rect x="350" y="900" width="60" height="60" fill="#bdc3c7" stroke="#95a5a6" stroke-width="1"/>
+  <text x="380" y="920" text-anchor="middle" class="small-text">膨胀=8</text>
+  <text x="380" y="935" text-anchor="middle" class="small-text">17×17</text>
+  <rect x="350" y="940" width="60" height="15" fill="#f39c12"/>
+  
+  <!-- Performance Metrics -->
+  <rect x="500" y="880" width="250" height="80" fill="#ecf0f1" stroke="#bdc3c7" stroke-width="1" rx="5"/>
+  <text x="625" y="900" text-anchor="middle" class="subtitle">性能提升预期</text>
+  <text x="520" y="920" class="text">• AUPRC: +2.1 百分点</text>
+  <text x="520" y="935" class="text">• 感受野: 3×3 → 17×17</text>
+  <text x="520" y="950" class="text">• 参数增量: 最小化</text>
+  
+</svg>

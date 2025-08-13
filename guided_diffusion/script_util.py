@@ -249,6 +249,8 @@ def create_model(
         from .unet_v2 import UNetModel
     elif unet_ver == "v1":
         from .unet_v1 import UNetModel
+    elif unet_ver == "dilated":
+        from .unet_dilated import UNetModel
     elif unet_ver == "bea":
         from .unet_bea import BEAUNetModel as UNetModel
     elif unet_ver == "bea_dual_loss":
