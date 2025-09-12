@@ -16,7 +16,7 @@ from guided_diffusion.script_util import (
 )
 
 from data import get_data_iter
-from obtain_hyperpara import obtain_hyperpara, get_mask_batch_FPDM
+from obtain_hyperpara import obtain_hyperpara, get_mask_batch_FPDM, get_mask_batch_FPDM_dual_threshold
 from evaluate import get_stats, evaluate, logging_metrics
 
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
@@ -169,7 +169,7 @@ def main():
 
         # collect metrics
         for n, ratio in enumerate(args.t_e_ratio):
-            pred_mask, pred_mask_all, pred_lab, pred_map, _ = get_mask_batch_FPDM(
+            pred_mask, pred_mask_all, pred_lab, pred_map, _ = get_mask_batch_FPDM_dual_threshold(
                 xstarts,
                 source,
                 args.modality,
@@ -177,8 +177,15 @@ def main():
                 diff_min,
                 diff_max,
                 args.image_size,
-                median_filter=args.median_filter,
                 device=dist_util.dev(),
+                # 双阈值策略参数
+                enable_dual_threshold=getattr(args, 'enable_dual_threshold', False),
+                low_quant_offset=getattr(args, 'low_quant_offset', -0.05),
+                high_quant_offset=getattr(args, 'high_quant_offset', 0.05),
+                entropy_weight=getattr(args, 'entropy_weight', 0.3),
+                entropy_threshold=getattr(args, 'entropy_threshold', 0.5),
+                # 原有参数
+                median_filter=args.median_filter,
                 t_e_ratio=ratio,
                 last_only=args.last_only,
                 interval=args.subset_interval,
@@ -318,6 +325,37 @@ def create_argparser():
         type=int,
         help="weight for clf-free samples",
         default=1,  # disabled in default
+    )
+    
+    # 双阈值策略参数
+    parser.add_argument(
+        "--enable_dual_threshold",
+        action="store_true",
+        help="Enable dual threshold strategy for enhanced anomaly detection",
+    )
+    parser.add_argument(
+        "--low_quant_offset",
+        type=float,
+        default=-0.05,
+        help="Low threshold quantile offset (relative to original quantile point)",
+    )
+    parser.add_argument(
+        "--high_quant_offset",
+        type=float,
+        default=0.05,
+        help="High threshold quantile offset (relative to original quantile point)",
+    )
+    parser.add_argument(
+        "--entropy_weight",
+        type=float,
+        default=0.3,
+        help="Weight for local entropy in final mask fusion",
+    )
+    parser.add_argument(
+        "--entropy_threshold",
+        type=float,
+        default=0.5,
+        help="Threshold for local entropy binarization",
     )
 
     add_dict_to_argparser(parser, defaults)

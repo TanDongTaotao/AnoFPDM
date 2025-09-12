@@ -34,6 +34,18 @@ version=dilated  # Use dilated UNet
 d_reverse=True # 设置为 True 使用 ddim reverse (确定性编码)
                # 否则将使用 ddpm reverse (随机编码)
 
+# --- [双阈值策略参数] ---
+# 设置为 true 启用双阈值策略，false 使用原始单阈值方法
+enable_dual_threshold=true
+# 低阈值偏移（负值表示更低的阈值，提高召回率）
+low_quant_offset=-0.15
+# 高阈值偏移（正值表示更高的阈值，提高精确度）
+high_quant_offset=0.15
+# 局部熵在最终掩码融合中的权重
+entropy_weight=0.3
+# 局部熵二值化阈值
+entropy_threshold=0.5
+
 # --- [步骤 4] ---
 # 循环运行，可用于进行消融实验
 for round in 1
@@ -77,6 +89,12 @@ do
         DIR_FLAGS="--save_data False --data_dir $data_dir  --image_dir $image_dir --model_dir $model_dir"
 
         ABLATION_FLAGS="--last_only False --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_gradient_para_sam False"
+        
+        # 双阈值策略参数标志
+        DUAL_THRESHOLD_FLAGS=""
+        if [ "$enable_dual_threshold" = "true" ]; then
+            DUAL_THRESHOLD_FLAGS="--enable_dual_threshold --low_quant_offset $low_quant_offset --high_quant_offset $high_quant_offset --entropy_weight $entropy_weight --entropy_threshold $entropy_threshold"
+        fi
 
         # --- [步骤 5] ---
         # 运行图像翻译脚本
@@ -85,7 +103,7 @@ do
                     --nnodes=1\
                     --rdzv-backend=c10d\
                     --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT\
-                ./scripts/translation_FPDM_dilated.py --name brats $MODEL_FLAGS $DIFFUSION_FLAGS $DIR_FLAGS $DATA_FLAGS $ABLATION_FLAGS
+                ./scripts/translation_FPDM_dilated.py --name brats $MODEL_FLAGS $DIFFUSION_FLAGS $DIR_FLAGS $DATA_FLAGS $ABLATION_FLAGS $DUAL_THRESHOLD_FLAGS
     done
 done
 
