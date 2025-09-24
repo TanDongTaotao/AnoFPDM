@@ -176,6 +176,7 @@ def get_mask_batch_FPDM(
     last_only=False,
     use_gradient_sam=False,
     use_gradient_para_sam=False,
+    use_timestep_weights=False,  # 独立的时间步权重参数
     interval=-1,
     forward_steps=None,
     diffusion_steps=None,
@@ -292,9 +293,21 @@ def get_mask_batch_FPDM(
                 )
             ############################################################
             
-            mask_mod = torch.mean(
-                mse_subset, axis=[0, 1], keepdim=True
-            )  # 1 x 1 x 128 x 128
+            # 计算温和的平方根衰减权重（独立于梯度SAM）
+            if use_timestep_weights and mse_subset.shape[1] > 1:
+                T = mse_subset.shape[1]  # 时间步总数
+                # 为每个时间步计算平方根衰减权重（温和衰减）
+                time_weights = torch.sqrt(torch.arange(T, 0, -1, dtype=torch.float32, device=device) / T)
+                time_weights = time_weights.view(1, -1, 1, 1, 1)  # [1, T, 1, 1, 1]
+                
+                # 应用时间步权重进行加权平均
+                weighted_mse = mse_subset * time_weights
+                mask_mod = torch.sum(weighted_mse, axis=[0, 1], keepdim=True) / torch.sum(time_weights)
+            else:
+                # 默认等权重平均
+                mask_mod = torch.mean(
+                    mse_subset, axis=[0, 1], keepdim=True
+                )  # 1 x 1 x 128 x 128
 
             thr_i += torch.quantile(mask_mod.reshape(-1), quant[mod])
             mapp += mask_mod

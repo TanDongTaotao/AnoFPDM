@@ -63,7 +63,7 @@ do
                         --rescale_learned_sigmas False --rescale_timesteps False"
 
     DIR_FLAGS="--save_data False --data_dir $data_dir  --image_dir $image_dir --model_dir $model_dir"
-    ABLATION_FLAGS="--last_only True --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False"
+    ABLATION_FLAGS="--last_only True --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_timestep_weights False"
 
     NUM_GPUS=1
     torchrun --nproc-per-node $NUM_GPUS \

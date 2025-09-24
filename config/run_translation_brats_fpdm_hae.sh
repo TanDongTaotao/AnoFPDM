@@ -76,7 +76,7 @@ tuilijiaobe        # 设置日志输出目录
 
         DIR_FLAGS="--save_data False --data_dir $data_dir  --image_dir $image_dir --model_dir $model_dir"
 
-        ABLATION_FLAGS="--last_only False --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_gradient_para_sam False"
+        ABLATION_FLAGS="--last_only False --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_gradient_para_sam False --use_timestep_weights False"
 
         # --- [步骤 5] ---
         # 运行HAE UNet图像翻译脚本

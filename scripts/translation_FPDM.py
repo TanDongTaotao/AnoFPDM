@@ -186,6 +186,7 @@ def main():
                 interval=args.subset_interval,
                 use_gradient_sam=args.use_gradient_sam,
                 use_gradient_para_sam=args.use_gradient_para_sam,
+                use_timestep_weights=args.use_timestep_weights,  # 添加新参数
                 forward_steps=args.forward_steps,
                 diffusion_steps=args.diffusion_steps,
                 w=args.w,
@@ -290,6 +291,7 @@ def create_argparser():
         use_weighted_sampler=False,
         use_gradient_sam=False,
         use_gradient_para_sam=False,
+        use_timestep_weights=False,  # 独立的时间步权重参数
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

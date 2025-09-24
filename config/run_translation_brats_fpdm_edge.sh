@@ -76,7 +76,7 @@ do
 
         DIR_FLAGS="--save_data True --data_dir $data_dir  --image_dir $image_dir --model_dir $model_dir"
 
-       ABLATION_FLAGS="--last_only False --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_gradient_para_sam False --edge_loss True"
+       ABLATION_FLAGS="--last_only False --subset_interval -1 --t_e_ratio 1 --use_gradient_sam False --use_gradient_para_sam False --use_timestep_weights False --edge_loss True"
 
         # --- [步骤 5] ---
         # 运行图像翻译脚本 (带有边缘正则化)
