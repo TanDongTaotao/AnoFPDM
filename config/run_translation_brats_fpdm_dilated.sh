@@ -46,6 +46,20 @@ entropy_weight=0.3
 # 局部熵二值化阈值
 entropy_threshold=0.5
 
+# --- [SNR权重策略参数] ---
+# 设置为 true 启用SNR权重聚合，false 使用传统双阈值策略
+enable_snr_weighting=false
+# SNR平滑参数，控制权重的平滑程度 (0.0-1.0)
+snr_smoothing=0.1
+# 时间衰减因子，控制时间步对权重的影响 (0.0-1.0)
+temporal_decay=0.9
+# 最小权重值，防止权重过小 (0.0-1.0)
+min_weight=0.1
+# 最大权重值，防止权重过大 (1.0-10.0)
+max_weight=2.0
+# 聚合模式：'weighted_mean' 或 'adaptive_threshold'
+aggregation_mode="weighted_mean"
+
 # --- [步骤 4] ---
 # 循环运行，可用于进行消融实验
 for round in 1
@@ -95,6 +109,12 @@ do
         if [ "$enable_dual_threshold" = "true" ]; then
             DUAL_THRESHOLD_FLAGS="--enable_dual_threshold --low_quant_offset $low_quant_offset --high_quant_offset $high_quant_offset --entropy_weight $entropy_weight --entropy_threshold $entropy_threshold"
         fi
+        
+        # SNR权重策略参数标志
+        SNR_WEIGHTING_FLAGS=""
+        if [ "$enable_snr_weighting" = "true" ]; then
+            SNR_WEIGHTING_FLAGS="--enable_snr_weighting --snr_smoothing $snr_smoothing --temporal_decay $temporal_decay --min_weight $min_weight --max_weight $max_weight --aggregation_mode $aggregation_mode"
+        fi
 
         # --- [步骤 5] ---
         # 运行图像翻译脚本
@@ -103,7 +123,7 @@ do
                     --nnodes=1\
                     --rdzv-backend=c10d\
                     --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT\
-                ./scripts/translation_FPDM_dilated.py --name brats $MODEL_FLAGS $DIFFUSION_FLAGS $DIR_FLAGS $DATA_FLAGS $ABLATION_FLAGS $DUAL_THRESHOLD_FLAGS
+                ./scripts/translation_FPDM_dilated.py --name brats $MODEL_FLAGS $DIFFUSION_FLAGS $DIR_FLAGS $DATA_FLAGS $ABLATION_FLAGS $DUAL_THRESHOLD_FLAGS $SNR_WEIGHTING_FLAGS
     done
 done
 

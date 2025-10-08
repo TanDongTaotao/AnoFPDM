@@ -16,7 +16,7 @@ from guided_diffusion.script_util import (
 )
 
 from data import get_data_iter
-from obtain_hyperpara import obtain_hyperpara, get_mask_batch_FPDM, get_mask_batch_FPDM_dual_threshold
+from obtain_hyperpara import obtain_hyperpara, get_mask_batch_FPDM, get_mask_batch_FPDM_dual_threshold, get_mask_batch_FPDM_with_snr_weighting
 from evaluate import get_stats, evaluate, logging_metrics
 
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
@@ -169,32 +169,64 @@ def main():
 
         # collect metrics
         for n, ratio in enumerate(args.t_e_ratio):
-            pred_mask, pred_mask_all, pred_lab, pred_map, _ = get_mask_batch_FPDM_dual_threshold(
-                xstarts,
-                source,
-                args.modality,
-                thr_01,
-                diff_min,
-                diff_max,
-                args.image_size,
-                device=dist_util.dev(),
-                # 双阈值策略参数
-                enable_dual_threshold=getattr(args, 'enable_dual_threshold', False),
-                low_quant_offset=getattr(args, 'low_quant_offset', -0.05),
-                high_quant_offset=getattr(args, 'high_quant_offset', 0.05),
-                entropy_weight=getattr(args, 'entropy_weight', 0.3),
-                entropy_threshold=getattr(args, 'entropy_threshold', 0.5),
-                # 原有参数
-                median_filter=args.median_filter,
-                t_e_ratio=ratio,
-                last_only=args.last_only,
-                interval=args.subset_interval,
-                use_gradient_sam=args.use_gradient_sam,
-                use_gradient_para_sam=args.use_gradient_para_sam,
-                forward_steps=args.forward_steps,
-                diffusion_steps=args.diffusion_steps,
-                w=args.w,
-            )
+            # 根据参数选择使用SNR权重或双阈值策略
+            if getattr(args, 'enable_snr_weighting', False):
+                # 使用SNR权重聚合
+                pred_mask, pred_mask_all, pred_lab, pred_map, _ = get_mask_batch_FPDM_with_snr_weighting(
+                    xstarts,
+                    source,
+                    args.modality,
+                    thr_01,
+                    diff_min,
+                    diff_max,
+                    args.image_size,
+                    device=dist_util.dev(),
+                    # SNR权重参数
+                    enable_snr_weighting=True,
+                    snr_smoothing=getattr(args, 'snr_smoothing', 0.1),
+                    temporal_decay=getattr(args, 'temporal_decay', 0.95),
+                    min_weight=getattr(args, 'min_weight', 0.1),
+                    max_weight=getattr(args, 'max_weight', 2.0),
+                    aggregation_mode=getattr(args, 'aggregation_mode', 'weighted_mean'),
+                    # 原有参数
+                    median_filter=args.median_filter,
+                    t_e_ratio=ratio,
+                    last_only=args.last_only,
+                    interval=args.subset_interval,
+                    use_gradient_sam=args.use_gradient_sam,
+                    use_gradient_para_sam=args.use_gradient_para_sam,
+                    forward_steps=args.forward_steps,
+                    diffusion_steps=args.diffusion_steps,
+                    w=args.w,
+                )
+            else:
+                # 使用原有的双阈值策略
+                pred_mask, pred_mask_all, pred_lab, pred_map, _ = get_mask_batch_FPDM_dual_threshold(
+                    xstarts,
+                    source,
+                    args.modality,
+                    thr_01,
+                    diff_min,
+                    diff_max,
+                    args.image_size,
+                    device=dist_util.dev(),
+                    # 双阈值策略参数
+                    enable_dual_threshold=getattr(args, 'enable_dual_threshold', False),
+                    low_quant_offset=getattr(args, 'low_quant_offset', -0.05),
+                    high_quant_offset=getattr(args, 'high_quant_offset', 0.05),
+                    entropy_weight=getattr(args, 'entropy_weight', 0.3),
+                    entropy_threshold=getattr(args, 'entropy_threshold', 0.5),
+                    # 原有参数
+                    median_filter=args.median_filter,
+                    t_e_ratio=ratio,
+                    last_only=args.last_only,
+                    interval=args.subset_interval,
+                    use_gradient_sam=args.use_gradient_sam,
+                    use_gradient_para_sam=args.use_gradient_para_sam,
+                    forward_steps=args.forward_steps,
+                    diffusion_steps=args.diffusion_steps,
+                    w=args.w,
+                )
             
             Y[n].append(lab)
             PRED_Y[n].append(pred_lab)
@@ -356,6 +388,44 @@ def create_argparser():
         type=float,
         default=0.5,
         help="Threshold for local entropy binarization",
+    )
+    
+    # SNR权重策略参数
+    parser.add_argument(
+        "--enable_snr_weighting",
+        action="store_true",
+        help="Enable SNR proxy weighting for sub-anomaly map aggregation",
+    )
+    parser.add_argument(
+        "--snr_smoothing",
+        type=float,
+        default=0.1,
+        help="SNR smoothing parameter to avoid division by zero",
+    )
+    parser.add_argument(
+        "--temporal_decay",
+        type=float,
+        default=0.95,
+        help="Temporal decay factor for time-step weighting",
+    )
+    parser.add_argument(
+        "--min_weight",
+        type=float,
+        default=0.1,
+        help="Minimum weight value for SNR weighting",
+    )
+    parser.add_argument(
+        "--max_weight",
+        type=float,
+        default=2.0,
+        help="Maximum weight value for SNR weighting",
+    )
+    parser.add_argument(
+        "--aggregation_mode",
+        type=str,
+        default="weighted_mean",
+        choices=["weighted_mean", "weighted_sum"],
+        help="Aggregation mode for SNR weighted sub-anomaly maps",
     )
 
     add_dict_to_argparser(parser, defaults)
