@@ -183,11 +183,13 @@ def main():
                     device=dist_util.dev(),
                     # SNR权重参数
                     enable_snr_weighting=True,
-                    snr_smoothing=getattr(args, 'snr_smoothing', 0.1),
-                    temporal_decay=getattr(args, 'temporal_decay', 0.95),
-                    min_weight=getattr(args, 'min_weight', 0.1),
-                    max_weight=getattr(args, 'max_weight', 2.0),
-                    aggregation_mode=getattr(args, 'aggregation_mode', 'weighted_mean'),
+                    snr_smoothing=getattr(args, 'snr_smoothing', 0.05),
+                    temporal_decay=getattr(args, 'temporal_decay', 0.98),
+                    min_weight=getattr(args, 'min_weight', 0.3),
+                    max_weight=getattr(args, 'max_weight', 1.5),
+                    consistency_weight=getattr(args, 'consistency_weight', 0.6),
+                    sensitivity_weight=getattr(args, 'sensitivity_weight', 0.4),
+                    aggregation_mode=getattr(args, 'aggregation_mode', 'robust_weighted'),
                     # 原有参数
                     median_filter=args.median_filter,
                     t_e_ratio=ratio,
@@ -399,7 +401,7 @@ def create_argparser():
     parser.add_argument(
         "--snr_smoothing",
         type=float,
-        default=0.1,
+        default=0.02,
         help="SNR smoothing parameter to avoid division by zero",
     )
     parser.add_argument(
@@ -411,20 +413,32 @@ def create_argparser():
     parser.add_argument(
         "--min_weight",
         type=float,
-        default=0.1,
+        default=0.7,
         help="Minimum weight value for SNR weighting",
     )
     parser.add_argument(
         "--max_weight",
         type=float,
-        default=2.0,
+        default=1.2,
         help="Maximum weight value for SNR weighting",
+    )
+    parser.add_argument(
+        "--consistency_weight",
+        type=float,
+        default=0.8,
+        help="Weight for reconstruction consistency in SNR calculation",
+    )
+    parser.add_argument(
+        "--sensitivity_weight",
+        type=float,
+        default=0.2,
+        help="Weight for anomaly sensitivity in SNR calculation",
     )
     parser.add_argument(
         "--aggregation_mode",
         type=str,
-        default="weighted_mean",
-        choices=["weighted_mean", "weighted_sum"],
+        default="robust_weighted",
+        choices=["weighted_mean", "weighted_sum", "robust_weighted"],
         help="Aggregation mode for SNR weighted sub-anomaly maps",
     )
 

@@ -49,16 +49,20 @@ entropy_threshold=0.5
 # --- [SNR权重策略参数] ---
 # 设置为 true 启用SNR权重聚合，false 使用传统双阈值策略
 enable_snr_weighting=false
-# SNR平滑参数，控制权重的平滑程度 (0.0-1.0)
-snr_smoothing=0.1
-# 时间衰减因子，控制时间步对权重的影响 (0.0-1.0)
-temporal_decay=0.9
-# 最小权重值，防止权重过小 (0.0-1.0)
-min_weight=0.1
-# 最大权重值，防止权重过大 (1.0-10.0)
-max_weight=2.0
-# 聚合模式：'weighted_mean' 或 'adaptive_threshold'
-aggregation_mode="weighted_mean"
+# SNR平滑参数，控制权重的平滑程度 (0.0-1.0) - 降低以保持更明确的权重区分
+snr_smoothing=0.02
+# 时间衰减因子，控制时间步对权重的影响 (0.0-1.0) - 适度降低以增强时间敏感性
+temporal_decay=0.95
+# 最小权重值，防止权重过小 (0.0-1.0) - 提高以保持严格筛选后区域的重要性
+min_weight=0.7
+# 最大权重值，防止权重过大 (1.0-10.0) - 降低以避免过度放大
+max_weight=1.2
+# 重建一致性权重，控制一致性在SNR计算中的比重 (0.0-1.0) - 提高以确保稳定检测
+consistency_weight=0.8
+# 异常敏感性权重，控制敏感性在SNR计算中的比重 (0.0-1.0) - 降低以平衡一致性
+sensitivity_weight=0.2
+# 聚合模式：'weighted_mean'、'weighted_sum' 或 'robust_weighted'
+aggregation_mode="robust_weighted"
 
 # --- [步骤 4] ---
 # 循环运行，可用于进行消融实验
@@ -113,7 +117,7 @@ do
         # SNR权重策略参数标志
         SNR_WEIGHTING_FLAGS=""
         if [ "$enable_snr_weighting" = "true" ]; then
-            SNR_WEIGHTING_FLAGS="--enable_snr_weighting --snr_smoothing $snr_smoothing --temporal_decay $temporal_decay --min_weight $min_weight --max_weight $max_weight --aggregation_mode $aggregation_mode"
+            SNR_WEIGHTING_FLAGS="--enable_snr_weighting --snr_smoothing $snr_smoothing --temporal_decay $temporal_decay --min_weight $min_weight --max_weight $max_weight --consistency_weight $consistency_weight --sensitivity_weight $sensitivity_weight --aggregation_mode $aggregation_mode"
         fi
 
         # --- [步骤 5] ---
