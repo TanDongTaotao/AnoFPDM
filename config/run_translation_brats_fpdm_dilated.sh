@@ -36,7 +36,7 @@ d_reverse=True # 设置为 True 使用 ddim reverse (确定性编码)
 
 # --- [双阈值策略参数] ---
 # 设置为 true 启用双阈值策略，false 使用原始单阈值方法
-enable_dual_threshold=true
+enable_dual_threshold=false
 # 低阈值偏移（负值表示更低的阈值，提高召回率）
 low_quant_offset=-0.15
 # 高阈值偏移（正值表示更高的阈值，提高精确度）

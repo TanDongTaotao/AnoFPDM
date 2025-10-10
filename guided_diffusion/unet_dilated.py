@@ -244,10 +244,86 @@ class ResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
+class SEBlock(nn.Module):
+    """
+    Squeeze-and-Excitation block for channel attention.
+    """
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class DirectionalDilatedConv(nn.Module):
+    """
+    Directional dilated convolutions for enhanced boundary preservation.
+    Implements horizontal, vertical, and diagonal directional filters.
+    """
+    def __init__(self, in_channels, out_channels, dilation, dims=2):
+        super().__init__()
+        self.dilation = dilation
+        self.dims = dims
+        
+        # Calculate output channels per direction
+        channels_per_dir = out_channels // 4  # 4 directions: horizontal, vertical, diagonal1, diagonal2
+        remaining_channels = out_channels - 4 * channels_per_dir
+        
+        # Horizontal directional convolution (1x3 kernel)
+        self.horizontal_conv = conv_nd(dims, in_channels, channels_per_dir, 
+                                     kernel_size=(1, 3), padding=(0, dilation), dilation=(1, dilation))
+        
+        # Vertical directional convolution (3x1 kernel)
+        self.vertical_conv = conv_nd(dims, in_channels, channels_per_dir,
+                                   kernel_size=(3, 1), padding=(dilation, 0), dilation=(dilation, 1))
+        
+        # Diagonal convolutions (3x3 with asymmetric dilation)
+        self.diagonal1_conv = conv_nd(dims, in_channels, channels_per_dir,
+                                    kernel_size=3, padding=dilation, dilation=dilation)
+        
+        self.diagonal2_conv = conv_nd(dims, in_channels, channels_per_dir,
+                                    kernel_size=3, padding=dilation, dilation=dilation)
+        
+        # Handle remaining channels with standard convolution
+        if remaining_channels > 0:
+            self.extra_conv = conv_nd(dims, in_channels, remaining_channels, 3, padding=dilation, dilation=dilation)
+        else:
+            self.extra_conv = None
+            
+    def forward(self, x):
+        # Apply directional convolutions
+        h_horizontal = self.horizontal_conv(x)
+        h_vertical = self.vertical_conv(x)
+        h_diagonal1 = self.diagonal1_conv(x)
+        h_diagonal2 = self.diagonal2_conv(x)
+        
+        # Concatenate all directional features
+        if self.extra_conv is not None:
+            h_extra = self.extra_conv(x)
+            return th.cat([h_horizontal, h_vertical, h_diagonal1, h_diagonal2, h_extra], dim=1)
+        else:
+            return th.cat([h_horizontal, h_vertical, h_diagonal1, h_diagonal2], dim=1)
+
+
 class DilatedResBlock(TimestepBlock):
     """
-    A dilated residual block with parallel dilated convolutions and fusion layer.
-    Maintains input/output dimensions and processes timestep embeddings correctly.
+    Enhanced dilated residual block with directional atrous convolutions and SE attention.
+    
+    Key innovations:
+    1. Directional Atrous Convolutions: Separate horizontal, vertical, and diagonal filters
+       for better boundary preservation in medical images
+    2. SE Attention: Channel-wise attention for adaptive feature selection
+    3. Multi-scale fusion: Combines features from different dilation rates
     
     :param channels: the number of input channels.
     :param emb_channels: the number of timestep embedding channels.
@@ -256,6 +332,8 @@ class DilatedResBlock(TimestepBlock):
     :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
     :param dims: determines if the signal is 1D, 2D, or 3D.
     :param use_checkpoint: if True, use gradient checkpointing on this module.
+    :param use_directional: if True, use directional dilated convolutions.
+    :param use_se_attention: if True, use SE attention mechanism.
     """
 
     def __init__(
@@ -267,6 +345,8 @@ class DilatedResBlock(TimestepBlock):
         use_scale_shift_norm=False,
         dims=2,
         use_checkpoint=False,
+        use_directional=True,
+        use_se_attention=True,
     ):
         super().__init__()
         self.channels = channels
@@ -275,6 +355,8 @@ class DilatedResBlock(TimestepBlock):
         self.out_channels = out_channels or channels
         self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
+        self.use_directional = use_directional
+        self.use_se_attention = use_se_attention
 
         # Input normalization and projection
         self.in_layers = nn.Sequential(
@@ -282,10 +364,17 @@ class DilatedResBlock(TimestepBlock):
             nn.Identity(),
         )
 
-        # Parallel dilated convolutions
-        self.dilated_conv_2 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=2, dilation=2)
-        self.dilated_conv_4 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=4, dilation=4)
-        self.dilated_conv_8 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=8, dilation=8)
+        # Enhanced parallel dilated convolutions with directional support
+        if self.use_directional:
+            # Use directional dilated convolutions
+            self.dilated_conv_2 = DirectionalDilatedConv(channels, self.out_channels // 3, dilation=2, dims=dims)
+            self.dilated_conv_4 = DirectionalDilatedConv(channels, self.out_channels // 3, dilation=4, dims=dims)
+            self.dilated_conv_8 = DirectionalDilatedConv(channels, self.out_channels // 3, dilation=8, dims=dims)
+        else:
+            # Use standard dilated convolutions (fallback)
+            self.dilated_conv_2 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=2, dilation=2)
+            self.dilated_conv_4 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=4, dilation=4)
+            self.dilated_conv_8 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=8, dilation=8)
         
         # Handle potential channel mismatch
         remaining_channels = self.out_channels - 3 * (self.out_channels // 3)
@@ -294,8 +383,18 @@ class DilatedResBlock(TimestepBlock):
         else:
             self.dilated_conv_extra = None
 
-        # Fusion layer
-        self.fusion = conv_nd(dims, self.out_channels, self.out_channels, 1)
+        # Fusion layer with batch normalization
+        self.fusion = nn.Sequential(
+            conv_nd(dims, self.out_channels, self.out_channels, 1),
+            normalization(self.out_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+        # SE Attention mechanism
+        if self.use_se_attention:
+            self.se_block = SEBlock(self.out_channels, reduction=16)
+        else:
+            self.se_block = nn.Identity()
 
         # Timestep embedding processing
         self.emb_layers = nn.Sequential(
@@ -322,7 +421,12 @@ class DilatedResBlock(TimestepBlock):
 
     def forward(self, x, emb):
         """
-        Apply the dilated block to a Tensor, conditioned on a timestep embedding.
+        Apply the enhanced dilated block to a Tensor, conditioned on a timestep embedding.
+        
+        Features:
+        1. Directional dilated convolutions for boundary preservation
+        2. SE attention for adaptive channel selection
+        3. Multi-scale feature fusion
 
         :param x: an [N x C x ...] Tensor of features.
         :param emb: an [N x emb_channels] Tensor of timestep embeddings.
@@ -331,7 +435,7 @@ class DilatedResBlock(TimestepBlock):
         # Input processing
         h = self.in_layers(x)
         
-        # Parallel dilated convolutions
+        # Parallel dilated convolutions (directional or standard)
         h2 = self.dilated_conv_2(h)
         h4 = self.dilated_conv_4(h)
         h8 = self.dilated_conv_8(h)
@@ -343,8 +447,11 @@ class DilatedResBlock(TimestepBlock):
         else:
             h = th.cat([h2, h4, h8], dim=1)
         
-        # Fusion
+        # Multi-scale fusion with normalization
         h = self.fusion(h)
+        
+        # Apply SE attention for adaptive feature selection
+        h = self.se_block(h)
         
         # Process timestep embedding
         emb_out = self.emb_layers(emb).type(h.dtype)
