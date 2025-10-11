@@ -245,6 +245,7 @@ class ResBlock(TimestepBlock):
 
 
 class SEBlock(nn.Module):
+
     """
     Squeeze-and-Excitation block for channel attention.
     """
@@ -265,6 +266,132 @@ class SEBlock(nn.Module):
         return x * y.expand_as(x)
 
 
+class DirectionalSEBlock(nn.Module):
+    """
+    Directional Squeeze-and-Excitation block for enhanced directional feature attention.
+    
+    This block applies SE attention separately to different directional features from
+    multiple dilation rates, then performs global fusion with another SE attention.
+    
+    Key innovations:
+    1. Direction-wise SE attention: Applies SE to horizontal, vertical, and diagonal features separately
+    2. Multi-scale directional fusion: Combines features from different dilation rates per direction
+    3. Global SE attention: Final attention mechanism on the fused directional features
+    
+    :param channels_per_direction: List of channel numbers for each direction [horizontal, vertical, diagonal1, diagonal2]
+    :param num_dilation_branches: Number of dilation rate branches (e.g., 3 for dilation rates 2, 4, 8)
+    :param reduction: Reduction ratio for SE attention
+    """
+    def __init__(self, channels_per_direction, num_dilation_branches=3, reduction=16, extra_channels=0):
+        super().__init__()
+        self.channels_per_direction = channels_per_direction
+        self.num_dilation_branches = num_dilation_branches
+        self.num_directions = len(channels_per_direction)
+        self.extra_channels = extra_channels
+        
+        # Calculate total channels per direction across all dilation branches
+        # The last direction gets the extra channels
+        self.total_channels_per_dir = []
+        for i, ch in enumerate(channels_per_direction):
+            if i == len(channels_per_direction) - 1:
+                # Last direction gets extra channels from the last branch
+                total_ch = ch * num_dilation_branches + extra_channels
+            else:
+                total_ch = ch * num_dilation_branches
+            self.total_channels_per_dir.append(total_ch)
+        
+        self.total_channels = sum(self.total_channels_per_dir)
+        
+        # Direction-wise SE blocks
+        self.directional_se_blocks = nn.ModuleList([
+            SEBlock(total_ch, reduction) for total_ch in self.total_channels_per_dir
+        ])
+        
+        # Global SE block for final fusion
+        self.global_se_block = SEBlock(self.total_channels, reduction)
+        
+        # Optional: Cross-directional attention for enhanced feature interaction
+        # Use appropriate number of groups for normalization
+        num_groups = min(32, self.total_channels)
+        while self.total_channels % num_groups != 0 and num_groups > 1:
+            num_groups -= 1
+        
+        self.cross_directional_fusion = nn.Sequential(
+            conv_nd(2, self.total_channels, self.total_channels, 1),
+            nn.GroupNorm(num_groups, self.total_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+    def forward(self, directional_features_list):
+        """
+        Apply directional SE attention to multi-scale directional features.
+        
+        :param directional_features_list: List of feature tensors from different dilation branches
+                                        Each tensor contains concatenated directional features
+                                        Expected format: [dilation2_features, dilation4_features, dilation8_features]
+                                        Each dilation_features: [batch, channels, height, width]
+                                        where channels = sum(channels_per_direction) for each branch
+        :return: Enhanced feature tensor with directional SE attention applied
+        """
+        batch_size = directional_features_list[0].size(0)
+        height, width = directional_features_list[0].size(2), directional_features_list[0].size(3)
+        
+        # Split each dilation branch into directional components
+        direction_wise_features = [[] for _ in range(self.num_directions)]
+        
+        for branch_idx, dilation_features in enumerate(directional_features_list):
+            # For the last branch, it might have extra channels
+            if branch_idx == len(directional_features_list) - 1:
+                # Last branch might have extra channels
+                total_expected = sum(self.channels_per_direction)
+                actual_channels = dilation_features.size(1)
+                extra_channels = actual_channels - total_expected
+                
+                # Split the concatenated features into directional components
+                start_idx = 0
+                for dir_idx, ch_per_dir in enumerate(self.channels_per_direction):
+                    if dir_idx == len(self.channels_per_direction) - 1:
+                        # Add extra channels to the last direction
+                        end_idx = start_idx + ch_per_dir + extra_channels
+                    else:
+                        end_idx = start_idx + ch_per_dir
+                    
+                    direction_wise_features[dir_idx].append(
+                        dilation_features[:, start_idx:end_idx, :, :]
+                    )
+                    start_idx = end_idx
+            else:
+                # Regular branches
+                start_idx = 0
+                for dir_idx, ch_per_dir in enumerate(self.channels_per_direction):
+                    end_idx = start_idx + ch_per_dir
+                    direction_wise_features[dir_idx].append(
+                        dilation_features[:, start_idx:end_idx, :, :]
+                    )
+                    start_idx = end_idx
+        
+        # Apply SE attention to each direction across all dilation scales
+        enhanced_directional_features = []
+        for dir_idx in range(self.num_directions):
+            # Concatenate features from all dilation rates for this direction
+            dir_features = th.cat(direction_wise_features[dir_idx], dim=1)  # [batch, total_ch_per_dir, H, W]
+            
+            # Apply directional SE attention
+            enhanced_dir_features = self.directional_se_blocks[dir_idx](dir_features)
+            enhanced_directional_features.append(enhanced_dir_features)
+        
+        # Concatenate all enhanced directional features
+        fused_features = th.cat(enhanced_directional_features, dim=1)  # [batch, total_channels, H, W]
+        
+        # Apply cross-directional fusion
+        fused_features = self.cross_directional_fusion(fused_features)
+        
+        # Apply global SE attention for final feature refinement
+        final_features = self.global_se_block(fused_features)
+        
+        return final_features
+
+
 class DirectionalDilatedConv(nn.Module):
     """
     Directional dilated convolutions for enhanced boundary preservation.
@@ -278,6 +405,13 @@ class DirectionalDilatedConv(nn.Module):
         # Calculate output channels per direction
         channels_per_dir = out_channels // 4  # 4 directions: horizontal, vertical, diagonal1, diagonal2
         remaining_channels = out_channels - 4 * channels_per_dir
+        
+        # Store channel information for DirectionalSEBlock
+        self.channels_per_dir = channels_per_dir
+        self.remaining_channels = remaining_channels
+        self.channels_per_direction = [channels_per_dir, channels_per_dir, channels_per_dir, channels_per_dir]
+        if remaining_channels > 0:
+            self.channels_per_direction.append(remaining_channels)
         
         # Horizontal directional convolution (1x3 kernel)
         self.horizontal_conv = conv_nd(dims, in_channels, channels_per_dir, 
@@ -301,6 +435,10 @@ class DirectionalDilatedConv(nn.Module):
             self.extra_conv = None
             
     def forward(self, x):
+        """
+        Standard forward pass that concatenates all directional features.
+        Maintains backward compatibility with existing code.
+        """
         # Apply directional convolutions
         h_horizontal = self.horizontal_conv(x)
         h_vertical = self.vertical_conv(x)
@@ -313,6 +451,29 @@ class DirectionalDilatedConv(nn.Module):
             return th.cat([h_horizontal, h_vertical, h_diagonal1, h_diagonal2, h_extra], dim=1)
         else:
             return th.cat([h_horizontal, h_vertical, h_diagonal1, h_diagonal2], dim=1)
+    
+    def forward_directional(self, x):
+        """
+        Forward pass that returns directional features separately for DirectionalSEBlock.
+        
+        :param x: Input tensor [batch, in_channels, height, width]
+        :return: Concatenated directional features (same as forward) and 
+                 channels_per_direction list for DirectionalSEBlock
+        """
+        # Apply directional convolutions
+        h_horizontal = self.horizontal_conv(x)
+        h_vertical = self.vertical_conv(x)
+        h_diagonal1 = self.diagonal1_conv(x)
+        h_diagonal2 = self.diagonal2_conv(x)
+        
+        # Concatenate all directional features
+        if self.extra_conv is not None:
+            h_extra = self.extra_conv(x)
+            concatenated_features = th.cat([h_horizontal, h_vertical, h_diagonal1, h_diagonal2, h_extra], dim=1)
+        else:
+            concatenated_features = th.cat([h_horizontal, h_vertical, h_diagonal1, h_diagonal2], dim=1)
+        
+        return concatenated_features, self.channels_per_direction
 
 
 class DilatedResBlock(TimestepBlock):
@@ -347,6 +508,7 @@ class DilatedResBlock(TimestepBlock):
         use_checkpoint=False,
         use_directional=True,
         use_se_attention=True,
+        use_directional_se=True,  # New parameter for directional SE attention
     ):
         super().__init__()
         self.channels = channels
@@ -357,6 +519,7 @@ class DilatedResBlock(TimestepBlock):
         self.use_scale_shift_norm = use_scale_shift_norm
         self.use_directional = use_directional
         self.use_se_attention = use_se_attention
+        self.use_directional_se = use_directional_se
 
         # Input normalization and projection
         self.in_layers = nn.Sequential(
@@ -365,23 +528,33 @@ class DilatedResBlock(TimestepBlock):
         )
 
         # Enhanced parallel dilated convolutions with directional support
+        # Calculate channels per branch to ensure exact division
+        base_channels = self.out_channels // 3
+        remaining_channels = self.out_channels - 3 * base_channels
+        
         if self.use_directional:
             # Use directional dilated convolutions
-            self.dilated_conv_2 = DirectionalDilatedConv(channels, self.out_channels // 3, dilation=2, dims=dims)
-            self.dilated_conv_4 = DirectionalDilatedConv(channels, self.out_channels // 3, dilation=4, dims=dims)
-            self.dilated_conv_8 = DirectionalDilatedConv(channels, self.out_channels // 3, dilation=8, dims=dims)
+            self.dilated_conv_2 = DirectionalDilatedConv(channels, base_channels, dilation=2, dims=dims)
+            self.dilated_conv_4 = DirectionalDilatedConv(channels, base_channels, dilation=4, dims=dims)
+            
+            # Add remaining channels to the last branch
+            last_branch_channels = base_channels + remaining_channels
+            self.dilated_conv_8 = DirectionalDilatedConv(channels, last_branch_channels, dilation=8, dims=dims)
+            
+            # Get channel information for DirectionalSEBlock directly from the conv layer
+            self.channels_per_direction = self.dilated_conv_2.channels_per_direction
         else:
             # Use standard dilated convolutions (fallback)
-            self.dilated_conv_2 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=2, dilation=2)
-            self.dilated_conv_4 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=4, dilation=4)
-            self.dilated_conv_8 = conv_nd(dims, channels, self.out_channels // 3, 3, padding=8, dilation=8)
+            self.dilated_conv_2 = conv_nd(dims, channels, base_channels, 3, padding=2, dilation=2)
+            self.dilated_conv_4 = conv_nd(dims, channels, base_channels, 3, padding=4, dilation=4)
+            
+            # Add remaining channels to the last branch
+            last_branch_channels = base_channels + remaining_channels
+            self.dilated_conv_8 = conv_nd(dims, channels, last_branch_channels, 3, padding=8, dilation=8)
+            self.channels_per_direction = None
         
-        # Handle potential channel mismatch
-        remaining_channels = self.out_channels - 3 * (self.out_channels // 3)
-        if remaining_channels > 0:
-            self.dilated_conv_extra = conv_nd(dims, channels, remaining_channels, 3, padding=1)
-        else:
-            self.dilated_conv_extra = None
+        # No extra conv needed since we handle remaining channels in the last branch
+        self.dilated_conv_extra = None
 
         # Fusion layer with batch normalization
         self.fusion = nn.Sequential(
@@ -390,11 +563,24 @@ class DilatedResBlock(TimestepBlock):
             nn.ReLU(inplace=True)
         )
         
-        # SE Attention mechanism
+        # SE Attention mechanism - choose between directional and standard
         if self.use_se_attention:
-            self.se_block = SEBlock(self.out_channels, reduction=16)
+            if self.use_directional and self.use_directional_se and self.channels_per_direction is not None:
+                # Use DirectionalSEBlock for enhanced directional attention
+                self.se_block = DirectionalSEBlock(
+                    channels_per_direction=self.channels_per_direction,
+                    num_dilation_branches=3,  # 3 dilation rates: 2, 4, 8
+                    reduction=16,
+                    extra_channels=remaining_channels  # Pass the extra channels to the last branch
+                )
+                self.use_directional_se_block = True
+            else:
+                # Use standard SEBlock
+                self.se_block = SEBlock(self.out_channels, reduction=16)
+                self.use_directional_se_block = False
         else:
             self.se_block = nn.Identity()
+            self.use_directional_se_block = False
 
         # Timestep embedding processing
         self.emb_layers = nn.Sequential(
@@ -425,7 +611,7 @@ class DilatedResBlock(TimestepBlock):
         
         Features:
         1. Directional dilated convolutions for boundary preservation
-        2. SE attention for adaptive channel selection
+        2. Enhanced directional SE attention or standard SE attention
         3. Multi-scale feature fusion
 
         :param x: an [N x C x ...] Tensor of features.
@@ -436,22 +622,36 @@ class DilatedResBlock(TimestepBlock):
         h = self.in_layers(x)
         
         # Parallel dilated convolutions (directional or standard)
-        h2 = self.dilated_conv_2(h)
-        h4 = self.dilated_conv_4(h)
-        h8 = self.dilated_conv_8(h)
-        
-        # Concatenate dilated features
-        if self.dilated_conv_extra is not None:
-            h_extra = self.dilated_conv_extra(h)
-            h = th.cat([h2, h4, h8, h_extra], dim=1)
+        if self.use_directional and self.use_directional_se_block:
+            # Use directional convolutions with separate outputs for DirectionalSEBlock
+            h2, _ = self.dilated_conv_2.forward_directional(h)
+            h4, _ = self.dilated_conv_4.forward_directional(h)
+            h8, _ = self.dilated_conv_8.forward_directional(h)
+            
+            # Prepare features list for DirectionalSEBlock
+            directional_features_list = [h2, h4, h8]
+            
+            # Apply DirectionalSEBlock before fusion
+            h = self.se_block(directional_features_list)
+            
         else:
+            # Standard approach: concatenate first, then apply SE
+            h2 = self.dilated_conv_2(h)
+            h4 = self.dilated_conv_4(h)
+            h8 = self.dilated_conv_8(h)
+            
+            # Concatenate dilated features (h8 already includes remaining channels)
             h = th.cat([h2, h4, h8], dim=1)
+            
+            # Multi-scale fusion with normalization
+            h = self.fusion(h)
+            
+            # Apply standard SE attention for adaptive feature selection
+            h = self.se_block(h)
         
-        # Multi-scale fusion with normalization
-        h = self.fusion(h)
-        
-        # Apply SE attention for adaptive feature selection
-        h = self.se_block(h)
+        # For directional SE, apply fusion after SE attention
+        if self.use_directional and self.use_directional_se_block:
+            h = self.fusion(h)
         
         # Process timestep embedding
         emb_out = self.emb_layers(emb).type(h.dtype)
