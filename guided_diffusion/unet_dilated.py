@@ -19,6 +19,12 @@ from .nn import (
     timestep_embedding,
 )
 
+# Import MSA²Net skip connection adapter
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'masag'))
+from masag import DilatedUNetSkipAdapter
+
 class AttentionPool2d(nn.Module):
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
@@ -985,6 +991,37 @@ class UNetModel(nn.Module):
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
         self.use_fp16 = use_fp16
+        
+        # Initialize MSA²Net skip connection adapters
+        # Rebuild input_block_chans for adapter initialization
+        adapter_input_chans = []
+        ch_temp = int(channel_mult[0] * model_channels)
+        adapter_input_chans.append(ch_temp)
+        
+        for level, mult in enumerate(channel_mult):
+            for _ in range(num_res_blocks):
+                ch_temp = int(mult * model_channels)
+                adapter_input_chans.append(ch_temp)
+            if level != len(channel_mult) - 1:
+                adapter_input_chans.append(ch_temp)
+        
+        self.skip_adapters = nn.ModuleList()
+        adapter_idx = 0
+        for level, mult in list(enumerate(channel_mult))[::-1]:
+            for i in range(num_res_blocks + 1):
+                # Calculate skip and decoder channel dimensions
+                skip_ch = adapter_input_chans[-(adapter_idx + 1)]
+                decoder_ch = int(model_channels * mult)
+                
+                # Create adapter for this skip connection
+                adapter = DilatedUNetSkipAdapter(
+                    skip_channels=skip_ch,
+                    decoder_channels=decoder_ch,  # Used for guidance in attention
+                    timestep_emb_dim=time_embed_dim,
+                    dims=dims
+                )
+                self.skip_adapters.append(adapter)
+                adapter_idx += 1
 
     def convert_to_fp16(self):
         """
@@ -1063,9 +1100,25 @@ class UNetModel(nn.Module):
             h = module(h, emb, cemb_mm)
             hs.append(h)
         h = self.middle_block(h, emb, cemb_mm)
+        
+        # Use MSA²Net skip connections with adapters
+        adapter_idx = 0
         for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
+            # Get skip connection features
+            skip_features = hs.pop()
+            
+            # Apply MSA²Net attention to skip connection
+            enhanced_skip = self.skip_adapters[adapter_idx](
+                skip_features=skip_features,
+                decoder_features=h,
+                timestep_emb=emb
+            )
+            
+            # Concatenate enhanced skip features with decoder features
+            h = th.cat([h, enhanced_skip], dim=1)
             h = module(h, emb, cemb_mm)
+            adapter_idx += 1
+            
         h = h.type(x.dtype)
         return self.out(h)
 
