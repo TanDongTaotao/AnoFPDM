@@ -992,7 +992,7 @@ class UNetModel(nn.Module):
         )
         self.use_fp16 = use_fp16
         
-        # Initialize MSA²Net skip connection adapters
+        # Initialize MSA²Net skip connection adapter only for the first (shallowest) layer
         # Rebuild input_block_chans for adapter initialization
         adapter_input_chans = []
         ch_temp = int(channel_mult[0] * model_channels)
@@ -1006,22 +1006,20 @@ class UNetModel(nn.Module):
                 adapter_input_chans.append(ch_temp)
         
         self.skip_adapters = nn.ModuleList()
-        adapter_idx = 0
-        for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(num_res_blocks + 1):
-                # Calculate skip and decoder channel dimensions
-                skip_ch = adapter_input_chans[-(adapter_idx + 1)]
-                decoder_ch = int(model_channels * mult)
-                
-                # Create adapter for this skip connection
-                adapter = DilatedUNetSkipAdapter(
-                    skip_channels=skip_ch,
-                    decoder_channels=decoder_ch,  # Used for guidance in attention
-                    timestep_emb_dim=time_embed_dim,
-                    dims=dims
-                )
-                self.skip_adapters.append(adapter)
-                adapter_idx += 1
+        
+        # Only create adapter for the first (shallowest) skip connection
+        # The first output block corresponds to the last input block (deepest features)
+        # So we need the adapter for the deepest skip connection
+        skip_ch = adapter_input_chans[-1]  # Last (deepest) input block channels
+        decoder_ch = int(model_channels * channel_mult[-1])  # Deepest decoder channels
+        
+        adapter = DilatedUNetSkipAdapter(
+            skip_channels=skip_ch,
+            decoder_channels=decoder_ch,  # Used for guidance in attention
+            timestep_emb_dim=time_embed_dim,
+            dims=dims
+        )
+        self.skip_adapters.append(adapter)
 
     def convert_to_fp16(self):
         """
@@ -1101,21 +1099,26 @@ class UNetModel(nn.Module):
             hs.append(h)
         h = self.middle_block(h, emb, cemb_mm)
         
-        # Use MSA²Net skip connections with adapters
+        # Use MSA²Net skip connections only for the first (shallowest) layer
         adapter_idx = 0
         for module in self.output_blocks:
             # Get skip connection features
             skip_features = hs.pop()
             
-            # Apply MSA²Net attention to skip connection
-            enhanced_skip = self.skip_adapters[adapter_idx](
-                skip_features=skip_features,
-                decoder_features=h,
-                timestep_emb=emb
-            )
+            # Only apply MSA²Net attention to the first (shallowest) skip connection
+            if adapter_idx == 0:
+                # Apply MSA²Net attention to skip connection
+                enhanced_skip = self.skip_adapters[0](
+                    skip_features=skip_features,
+                    decoder_features=h,
+                    timestep_emb=emb
+                )
+                # Concatenate enhanced skip features with decoder features
+                h = th.cat([h, enhanced_skip], dim=1)
+            else:
+                # Use original UNet skip connection (direct concatenation)
+                h = th.cat([h, skip_features], dim=1)
             
-            # Concatenate enhanced skip features with decoder features
-            h = th.cat([h, enhanced_skip], dim=1)
             h = module(h, emb, cemb_mm)
             adapter_idx += 1
             
