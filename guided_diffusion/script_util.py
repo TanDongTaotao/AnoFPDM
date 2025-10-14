@@ -267,6 +267,8 @@ def create_model(
         from .unet_hae_v2 import HAEUNetModelV2 as UNetModel
     elif unet_ver == "hae_v2_conservative":
         from .unet_hae_v2_conservative import HAEUNetModelV2Conservative as UNetModel
+    elif unet_ver == "domain_adapt":
+        from .unet_dilated_domain_adapt import DomainAdaptUNetModel as UNetModel
     else:
         raise ValueError(f"unsupported unet version: {unet_ver}")
     

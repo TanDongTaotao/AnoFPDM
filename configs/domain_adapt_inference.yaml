@@ -1,0 +1,237 @@
+# Domain Adaptation Inference Configuration
+
+# Base configuration for domain adaptation inference
+base:
+  # Model settings
+  model_dir: "models/domain_adapt"
+  model_num: "latest"
+  ema: true
+  
+  # Inference settings
+  batch_size: 1
+  batch_size_val: 1
+  num_batches_val: 0
+  seed: 42
+  forward_steps: 600
+  dynamic_clip: false
+  null: false
+  
+  # Post-processing
+  median_filter: false
+  last_only: false
+  subset_interval: 1
+  use_gradient_sam: false
+  use_gradient_para_sam: false
+  save_images: false
+  use_weighted_sampler: false
+  
+  # Evaluation ratios
+  t_e_ratio:
+    - 0.5
+  
+  # Domain adaptation
+  target_domain: 1
+
+# Dataset-specific configurations
+datasets:
+  brats:
+    name: "brats"
+    data_dir: "data/brats"
+    image_dir: "results/brats_domain_adapt"
+    modality: "t1"
+    d_reverse: false
+    w: 2.0
+    num_batches: 100
+    
+    # Model architecture
+    image_size: 256
+    num_channels: 128
+    num_res_blocks: 2
+    channel_mult:
+      - 1
+      - 1
+      - 2
+      - 2
+      - 4
+      - 4
+    num_heads: 4
+    num_head_channels: 64
+    num_heads_upsample: -1
+    attention_resolutions: "32,16,8"
+    dropout: 0.0
+    learn_sigma: true
+    sigma_small: false
+    class_cond: false
+    diffusion_steps: 1000
+    noise_schedule: "linear"
+    timestep_respacing: ""
+    use_kl: false
+    predict_xstart: false
+    rescale_timesteps: false
+    rescale_learned_sigmas: false
+    use_checkpoint: false
+    use_scale_shift_norm: true
+    resblock_updown: false
+    use_fp16: false
+    use_new_attention_order: false
+    
+    # Domain adaptation specific
+    enable_domain_adaptation: true
+    domain_emb_dim: 64
+    num_domains: 2
+    
+  atlas:
+    name: "atlas"
+    data_dir: "data/atlas"
+    image_dir: "results/atlas_domain_adapt"
+    modality: "t1"
+    d_reverse: false
+    w: 20.0
+    num_batches: 50
+    
+    # Model architecture
+    image_size: 256
+    num_channels: 128
+    num_res_blocks: 2
+    channel_mult:
+      - 1
+      - 1
+      - 2
+      - 2
+      - 4
+      - 4
+    num_heads: 4
+    num_head_channels: 64
+    num_heads_upsample: -1
+    attention_resolutions: "32,16,8"
+    dropout: 0.0
+    learn_sigma: true
+    sigma_small: false
+    class_cond: false
+    diffusion_steps: 1000
+    noise_schedule: "linear"
+    timestep_respacing: ""
+    use_kl: false
+    predict_xstart: false
+    rescale_timesteps: false
+    rescale_learned_sigmas: false
+    use_checkpoint: false
+    use_scale_shift_norm: true
+    resblock_updown: false
+    use_fp16: false
+    use_new_attention_order: false
+    
+    # Domain adaptation specific
+    enable_domain_adaptation: true
+    domain_emb_dim: 64
+    num_domains: 2
+
+# Advanced inference strategies
+strategies:
+  # Standard inference
+  standard:
+    enable_dual_threshold: false
+    enable_snr_weighting: false
+    
+  # Dual threshold strategy
+  dual_threshold:
+    enable_dual_threshold: true
+    low_quant_offset: -0.05
+    high_quant_offset: 0.05
+    entropy_weight: 0.3
+    entropy_threshold: 0.5
+    
+  # SNR weighting strategy
+  snr_weighting:
+    enable_snr_weighting: true
+    snr_smoothing: 0.02
+    temporal_decay: 0.95
+    min_weight: 0.7
+    max_weight: 1.2
+    consistency_weight: 0.8
+    sensitivity_weight: 0.2
+    aggregation_mode: "robust_weighted"
+    
+  # Combined strategy
+  combined:
+    enable_dual_threshold: true
+    low_quant_offset: -0.03
+    high_quant_offset: 0.03
+    entropy_weight: 0.2
+    entropy_threshold: 0.6
+    enable_snr_weighting: true
+    snr_smoothing: 0.01
+    temporal_decay: 0.98
+    min_weight: 0.8
+    max_weight: 1.1
+    consistency_weight: 0.7
+    sensitivity_weight: 0.3
+    aggregation_mode: "robust_weighted"
+
+# Domain adaptation scenarios
+scenarios:
+  # Source to target domain adaptation
+  source_to_target:
+    target_domain: 1
+    description: "Adapt from source domain (0) to target domain (1)"
+    
+  # Target to source domain adaptation  
+  target_to_source:
+    target_domain: 0
+    description: "Adapt from target domain (1) to source domain (0)"
+    
+  # Cross-domain evaluation
+  cross_domain:
+    target_domain: 1
+    description: "Evaluate cross-domain generalization"
+    eval_both_domains: true
+
+# Hyperparameters for different datasets and forward steps
+hyperparameters:
+  brats:
+    forward_steps_999:
+      thr_01: 0.9993147253990173
+      diff_min:
+        - 0.0022
+        - 0.0010
+      diff_max:
+        - 0.0551
+        - 0.0388
+    forward_steps_600:
+      thr_01: 0.9948798418045044
+      diff_min:
+        - 5.5484e-05
+        - 3.4732e-05
+      diff_max:
+        - 0.0509
+        - 0.0397
+      
+  atlas:
+    forward_steps_600:
+      thr_01: 0.7285396456718445
+      diff_min:
+        - 0.0392
+      diff_max:
+        - 0.8555
+
+# Example usage configurations
+examples:
+  brats_standard:
+    dataset: "brats"
+    strategy: "standard"
+    scenario: "source_to_target"
+    
+  brats_dual_threshold:
+    dataset: "brats"
+    strategy: "dual_threshold"
+    scenario: "source_to_target"
+    
+  brats_snr_weighting:
+    dataset: "brats"
+    strategy: "snr_weighting"
+    scenario: "source_to_target"
+    
+  atlas_combined:
+    dataset: "atlas"
+    strategy: "combined"
+    scenario: "cross_domain"
