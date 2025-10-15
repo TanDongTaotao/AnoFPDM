@@ -17,7 +17,15 @@ image_size=128
 threshold=0.1
 version=domain_adapt  # Use domain adaptation UNet
 
-# Domain adaptation specific parameters
+# Target domain adaptation parameters (Atlas only)
+TARGET_NAME="atlas"
+TARGET_DATA_DIR="F:/PycharmProjects/AnoFPDM/data/atlas"
+PRETRAINED_MODEL_PATH="F:/PycharmProjects/AnoFPDM/results/brats/model_dilated_clf_free_guided/model_best.pt"
+DOMAIN_ADAPT_WEIGHT=1.0
+CONSISTENCY_WEIGHT=1.0
+ENTROPY_WEIGHT=0.1
+FEATURE_ALIGN_WEIGHT=0.5
+
 enable_domain_adaptation=True
 num_domains=2
 domain_embedding_dim=64
@@ -68,6 +76,33 @@ export MASTER_ADDR=localhost
 export MASTER_PORT=12361  # Use different port to avoid conflicts
 
 NUM_GPUS=1
-torchrun --nproc-per-node $NUM_GPUS \
-        ./scripts/train_dilated_domain_adapt.py --name atlas \
-                            $DATA_FLAGS $MODEL_FLAGS $DOMAIN_ADAPT_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS $GUI_FLAGS $EVA_FLAGS
+torchrun --nproc_per_node $NUM_GPUS \
+        ./scripts/train_dilated_domain_adapt.py \
+                            --name $TARGET_NAME \
+                            --data_dir $TARGET_DATA_DIR \
+                            --pretrained_model_path $PRETRAINED_MODEL_PATH \
+                            --domain_adapt_weight $DOMAIN_ADAPT_WEIGHT \
+                            --consistency_weight $CONSISTENCY_WEIGHT \
+                            --entropy_weight $ENTROPY_WEIGHT \
+                            --feature_align_weight $FEATURE_ALIGN_WEIGHT \
+                            --enable_domain_adaptation $enable_domain_adaptation \
+                            --num_domains $num_domains \
+                            --domain_embedding_dim $domain_embedding_dim \
+                            --freeze_main_network $freeze_backbone \
+                            --ddpm_sampling $ddpm_sampling \
+                            --in_channels $in_channels \
+                            --batch_size $batch_size \
+                            --save_interval $save_interval \
+                            --num_classes $num_classes \
+                            --image_size $image_size \
+                            --threshold $threshold \
+                            --version $version \
+                            --log_dir $log_dir \
+                            --image_dir $image_dir \
+                            --gui $gui \
+                            --data $data \
+                            --model $model \
+                            --diffusion $diffusion \
+                            --train $train \
+                            --eval $eval \
+                            --total_epochs 50

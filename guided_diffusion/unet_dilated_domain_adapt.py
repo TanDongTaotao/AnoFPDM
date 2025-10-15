@@ -687,12 +687,11 @@ class DomainAdaptUNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
         
-        # Domain embedding for domain adaptation
+        # Domain embedding for target domain adaptation
         if self.enable_domain_adaptation:
-            self.domain_embed = nn.Sequential(
-                linear(2, domain_emb_dim),  # 2 domains: source (BraTS) and target (ATLAS)
-                nn.SiLU(),
-                linear(domain_emb_dim, domain_emb_dim),
+            # Simplified: fixed embedding for target domain (Atlas)
+            self.domain_embed = nn.Parameter(
+                th.randn(1, domain_emb_dim) * 0.02  # Learnable target domain embedding
             )
 
         if self.num_classes is not None and clf_free:
@@ -876,12 +875,6 @@ class DomainAdaptUNetModel(nn.Module):
         
         # Domain adaptation modules
         if enable_domain_adaptation:
-            # Domain embedding layer
-            self.domain_embed = nn.Sequential(
-                linear(2, domain_emb_dim),  # 2 for source/target domain one-hot
-                nn.SiLU(),
-                linear(domain_emb_dim, domain_emb_dim)
-            )
             
             # Create domain adapters for each input block based on actual channel counts
             self.domain_adapters = nn.ModuleList()
@@ -960,14 +953,12 @@ class DomainAdaptUNetModel(nn.Module):
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
         cemb_mm = None
         
-        # Domain embedding
+        # Domain embedding for target domain adaptation
         domain_emb = None
-        if self.enable_domain_adaptation and domain_label is not None:
-            # Convert domain labels to one-hot encoding
-            batch_size = domain_label.shape[0]
-            domain_onehot = th.zeros(batch_size, 2, device=domain_label.device, dtype=th.float32)
-            domain_onehot.scatter_(1, domain_label.unsqueeze(1), 1.0)
-            domain_emb = self.domain_embed(domain_onehot)
+        if self.enable_domain_adaptation:
+            # Use fixed target domain embedding for all samples
+            batch_size = x.shape[0]
+            domain_emb = self.domain_embed.expand(batch_size, -1)
         
         #-------------------------------- Condition Setup --------------------------
         '''

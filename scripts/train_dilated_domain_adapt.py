@@ -57,13 +57,10 @@ class DomainAdaptTrainLoop(TrainLoop):
         ddpm_sampling=False,
         total_epochs=1000,
         # Domain adaptation specific parameters
-        source_data=None,
-        target_data=None,
         domain_adapt_weight=1.0,
         consistency_weight=1.0,
         entropy_weight=0.1,
         feature_align_weight=0.5,
-        adaptation_start_epoch=100,
     ):
         super().__init__(
             model=model,
@@ -93,54 +90,23 @@ class DomainAdaptTrainLoop(TrainLoop):
         )
         
         # Domain adaptation specific attributes
-        self.source_data = source_data
-        self.target_data = target_data
         self.domain_adapt_weight = domain_adapt_weight
         self.consistency_weight = consistency_weight
         self.entropy_weight = entropy_weight
         self.feature_align_weight = feature_align_weight
-        self.adaptation_start_epoch = adaptation_start_epoch
-        
-        # Create target data iterator if provided
-        if target_data is not None:
-            self.target_data_iter = iter(target_data)
-        else:
-            self.target_data_iter = None
     
     def run_step(self, batch, cond):
         """
-        Extended run_step for domain adaptation training.
+        Target-only domain adaptation training.
+        Only uses target domain data for self-supervised adaptation.
         """
-        current_epoch = self.step // len(self.data)
+        # Target domain self-supervised training
+        # Use domain_label=1 for target domain (Atlas)
+        target_loss = self.forward_backward_target(batch, cond, domain_label=1)
         
-        # Standard source domain training
-        source_loss = self.forward_backward(batch, cond, domain_label=0)
-        
-        # Domain adaptation training (after adaptation_start_epoch)
-        if (current_epoch >= self.adaptation_start_epoch and 
-            self.target_data_iter is not None and 
-            hasattr(self.model, 'enable_domain_adaptation') and 
-            self.model.enable_domain_adaptation):
-            
-            # Get target domain batch
-            try:
-                target_batch, target_cond = next(self.target_data_iter)
-            except StopIteration:
-                # Reset target data iterator
-                self.target_data_iter = iter(self.target_data)
-                target_batch, target_cond = next(self.target_data_iter)
-            
-            # Move target data to device
-            target_batch = target_batch.to(dist_util.dev())
-            if target_cond is not None:
-                target_cond = {k: v.to(dist_util.dev()) for k, v in target_cond.items()}
-            
-            # Target domain adaptation loss
-            target_loss = self.forward_backward_target(target_batch, target_cond, domain_label=1)
-            
-            # Log domain adaptation losses
-            if self.step % self.log_interval == 0:
-                logger.log(f"source_loss: {source_loss:.6f}, target_loss: {target_loss:.6f}")
+        # Log adaptation loss
+        if self.step % self.log_interval == 0:
+            logger.log(f"target_adaptation_loss: {target_loss:.6f}")
         
         self.mp_trainer.optimize(self.opt)
         if self.ema_rate > 0:
@@ -320,6 +286,31 @@ def main():
             100.0 * domain_params / model_size
         ))
 
+    # Freeze main network parameters if specified
+    if args.freeze_main_network:
+        logger.log("Freezing main network parameters, only training domain adaptation modules...")
+        frozen_params = 0
+        trainable_params = 0
+        
+        for name, param in model.named_parameters():
+            # Keep domain adaptation modules trainable
+            if any(keyword in name for keyword in ['domain_', 'film_', 'adapter']):
+                param.requires_grad = True
+                trainable_params += param.data.nelement()
+            else:
+                # Freeze main network parameters
+                param.requires_grad = False
+                frozen_params += param.data.nelement()
+        
+        logger.log("Frozen params: %.2f M (%.2f%%)" % (
+            frozen_params / 1024 / 1024, 
+            100.0 * frozen_params / model_size
+        ))
+        logger.log("Trainable params: %.2f M (%.2f%%)" % (
+            trainable_params / 1024 / 1024, 
+            100.0 * trainable_params / model_size
+        ))
+
     pathlib.Path(args.image_dir).mkdir(parents=True, exist_ok=True)
 
     model.to(dist_util.dev())
@@ -346,46 +337,29 @@ def main():
     else:
         raise ValueError(f"Unknown noise type: {args.noise_type}")
 
-    logger.log("creating source domain data loader...")
-
-    # Source domain data (e.g., BraTS)
-    source_data = get_data_iter(
-        args.source_name,
-        args.source_data_dir,
+    # Load target domain data (e.g., ATLAS) for self-supervised adaptation
+    logger.log("Loading target domain data for adaptation...")
+    data = get_data_iter(
+        args.name,
+        args.data_dir,
         mixed=args.mixed,
         batch_size=args.batch_size,
         split=args.split,
-        ret_lab=args.ret_lab,
+        ret_lab=False,  # Target domain is unlabeled for self-supervised learning
         n_unhealthy_patients=args.n_unhealthy_patients,
         n_healthy_patients=args.n_healthy_patients,
         logger=logger,
     )
 
-    # Target domain data (e.g., ATLAS) - for domain adaptation
-    target_data = None
-    if args.target_name and args.target_data_dir:
-        logger.log("creating target domain data loader...")
-        target_data = get_data_iter(
-            args.target_name,
-            args.target_data_dir,
-            mixed=args.mixed,
-            batch_size=args.batch_size,
-            split=args.split,
-            ret_lab=False,  # Target domain is unlabeled
-            n_unhealthy_patients=args.n_unhealthy_patients,
-            n_healthy_patients=args.n_healthy_patients,
-            logger=logger,
-        )
-
-    check_data(source_data[0], args.image_dir, name=args.source_name, split=args.split)
+    check_data(data[0], args.image_dir, name=args.name, split=args.split)
 
     logger.log("training...")
 
-    # Use domain adaptation training loop
+    # Use domain adaptation training loop for target-only adaptation
     DomainAdaptTrainLoop(
         model=model,
         diffusion=diffusion,
-        data=source_data,
+        data=data,
         batch_size=args.batch_size,
         microbatch=args.microbatch,
         lr=args.lr,
@@ -408,13 +382,10 @@ def main():
         ddpm_sampling=args.ddpm_sampling,
         total_epochs=args.total_epochs,
         # Domain adaptation specific parameters
-        source_data=source_data,
-        target_data=target_data,
         domain_adapt_weight=args.domain_adapt_weight,
         consistency_weight=args.consistency_weight,
         entropy_weight=args.entropy_weight,
         feature_align_weight=args.feature_align_weight,
-        adaptation_start_epoch=args.adaptation_start_epoch,
     ).run_loop()
 
 
@@ -486,6 +457,7 @@ def create_argparser():
     parser.add_argument("--entropy_weight", type=float, help="weight for entropy minimization loss")
     parser.add_argument("--feature_align_weight", type=float, help="weight for feature alignment loss")
     parser.add_argument("--adaptation_start_epoch", type=int, help="epoch to start domain adaptation")
+    parser.add_argument("--freeze_main_network", type=bool, default=False, help="freeze main network parameters, only train domain adaptation modules")
     
     add_dict_to_argparser(parser, defaults)
     return parser
