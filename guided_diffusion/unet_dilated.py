@@ -671,6 +671,127 @@ class DilatedResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
+class PyramidFusionBlock(nn.Module):
+    """
+    多尺度特征金字塔融合模块
+    
+    通过并行的多膨胀率卷积构建特征金字塔，实现多尺度信息的高效融合。
+    设计用于增强跳跃连接，提升异常检测的精度和边界定位能力。
+    
+    核心特性：
+    1. 多尺度感受野：3×3, 5×5, 9×9 三种感受野并行处理
+    2. 特征分组：减少计算量，提高效率
+    3. 残差连接：保证梯度流动和特征复用
+    4. 自适应融合：通过注意力机制智能融合不同尺度特征
+    """
+    
+    def __init__(
+        self,
+        skip_channels,      # 跳跃连接的通道数
+        current_channels,   # 当前层的通道数
+        dims=2,            # 空间维度
+        dilation_rates=(1, 3, 5),  # 膨胀率组合
+        reduction=8,       # 注意力机制的降维比例
+        use_checkpoint=False
+    ):
+        super().__init__()
+        
+        self.skip_channels = skip_channels
+        self.current_channels = current_channels
+        self.dims = dims
+        self.dilation_rates = dilation_rates
+        self.use_checkpoint = use_checkpoint
+        
+        # 计算每个分组的通道数
+        self.group_channels = skip_channels // len(dilation_rates)
+        assert skip_channels % len(dilation_rates) == 0, \
+            f"skip_channels ({skip_channels}) must be divisible by number of dilation rates ({len(dilation_rates)})"
+        
+        # 多尺度膨胀卷积分支
+        self.pyramid_convs = nn.ModuleList()
+        for dilation in dilation_rates:
+            conv_branch = nn.Sequential(
+                conv_nd(dims, self.group_channels, self.group_channels, 
+                       kernel_size=3, padding=dilation, dilation=dilation),
+                normalization(self.group_channels),
+                nn.SiLU(),
+                conv_nd(dims, self.group_channels, self.group_channels, 
+                       kernel_size=1)  # 1x1卷积用于特征精炼
+            )
+            self.pyramid_convs.append(conv_branch)
+        
+        # 特征融合层
+        fused_channels = skip_channels
+        self.fusion_conv = nn.Sequential(
+            conv_nd(dims, fused_channels, fused_channels, kernel_size=1),
+            normalization(fused_channels),
+            nn.SiLU()
+        )
+        
+        # 自适应注意力机制
+        self.attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1) if dims == 2 else nn.AdaptiveAvgPool3d(1),
+            conv_nd(dims, fused_channels, fused_channels // reduction, kernel_size=1),
+            nn.SiLU(),
+            conv_nd(dims, fused_channels // reduction, fused_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # 输出投影层（保持跳跃连接的通道数不变）
+        self.output_proj = conv_nd(dims, fused_channels, skip_channels, kernel_size=1)
+        
+        # 残差连接保持原始通道数
+        self.skip_proj = nn.Identity()
+    
+    def forward(self, skip_features):
+        """
+        前向传播
+        
+        Args:
+            skip_features: 来自编码器的跳跃连接特征 [B, skip_channels, H, W]
+            
+        Returns:
+            enhanced_features: 增强后的特征 [B, current_channels, H, W]
+        """
+        if self.use_checkpoint:
+            return checkpoint(self._forward, skip_features)
+        else:
+            return self._forward(skip_features)
+    
+    def _forward(self, skip_features):
+        B, C, *spatial_dims = skip_features.shape
+        
+        # 1. 特征分组
+        # 将跳跃连接特征按通道分组，每组对应一个膨胀率
+        grouped_features = th.chunk(skip_features, len(self.dilation_rates), dim=1)
+        
+        # 2. 多尺度膨胀卷积
+        pyramid_outputs = []
+        for i, (group_feat, conv_branch) in enumerate(zip(grouped_features, self.pyramid_convs)):
+            # 对每组特征应用对应的膨胀卷积
+            enhanced_feat = conv_branch(group_feat)
+            pyramid_outputs.append(enhanced_feat)
+        
+        # 3. 特征拼接
+        fused_features = th.cat(pyramid_outputs, dim=1)
+        
+        # 4. 特征融合
+        fused_features = self.fusion_conv(fused_features)
+        
+        # 5. 自适应注意力加权
+        attention_weights = self.attention(fused_features)
+        attended_features = fused_features * attention_weights
+        
+        # 6. 输出投影
+        output = self.output_proj(attended_features)
+        
+        # 7. 残差连接
+        residual = self.skip_proj(skip_features)
+        enhanced_features = output + residual
+        
+        return enhanced_features
+
+
 class AttentionBlock(nn.Module):
     """
     An attention block that allows spatial positions to attend to each other.
@@ -803,6 +924,8 @@ class UNetModel(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         clf_free=True,
+        use_pyramid_fusion=False,  # 新增：是否启用多尺度金字塔融合
+        pyramid_fusion_levels=None,  # 新增：指定在哪些层级启用金字塔融合
     ):
         super().__init__()
 
@@ -933,6 +1056,9 @@ class UNetModel(nn.Module):
         )
         self._feature_size += ch
 
+        # 保存 input_block_chans 的副本，因为在构建 output_blocks 时会被 pop() 清空
+        input_block_chans_copy = input_block_chans.copy()
+
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
@@ -984,6 +1110,43 @@ class UNetModel(nn.Module):
             nn.Identity(),
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
+        
+        # 初始化多尺度金字塔融合模块
+        self.use_pyramid_fusion = use_pyramid_fusion
+        self.pyramid_fusion_blocks = nn.ModuleDict()
+        
+        # 更新 input_block_chans 为最终的完整列表（使用副本）
+        self.input_block_chans = input_block_chans_copy
+        
+        if use_pyramid_fusion:
+            # 如果未指定层级，默认先在16×16分辨率启用（保守策略）
+            if pyramid_fusion_levels is None:
+                # 根据 channel_mult 确定关键层级
+                # 通常 16×16 对应 level 2，先从这个分辨率开始验证
+                pyramid_fusion_levels = [2] if len(channel_mult) > 2 else [1]
+            
+            # 为每个指定的层级创建金字塔融合模块
+            output_block_idx = 0
+            for level, mult in list(enumerate(channel_mult))[::-1]:
+                for i in range(num_res_blocks + 1):
+                    if level in pyramid_fusion_levels and output_block_idx < len(input_block_chans_copy):
+                        # 获取对应的跳跃连接通道数和当前层通道数
+                        skip_ch = input_block_chans_copy[-(output_block_idx + 1)]  # 对应的跳跃连接通道数
+                        current_ch = int(model_channels * mult)  # 当前层通道数
+                        
+                        # 确保跳跃连接通道数能被膨胀率数量整除
+                        if skip_ch % 2 == 0:  # 使用2个膨胀率 (1, 3) 以兼容更多通道数
+                            fusion_key = f"level_{level}_block_{i}"
+                            self.pyramid_fusion_blocks[fusion_key] = PyramidFusionBlock(
+                                skip_channels=skip_ch,
+                                current_channels=current_ch,
+                                dims=dims,
+                                dilation_rates=(1, 3),  # 使用2个膨胀率
+                                reduction=8,
+                                use_checkpoint=use_checkpoint
+                            )
+                    output_block_idx += 1
+        
         self.use_fp16 = use_fp16
 
     def convert_to_fp16(self):
@@ -1063,9 +1226,31 @@ class UNetModel(nn.Module):
             h = module(h, emb, cemb_mm)
             hs.append(h)
         h = self.middle_block(h, emb, cemb_mm)
-        for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, cemb_mm)
+        
+        # 处理输出块，集成金字塔融合
+        output_block_idx = 0
+        for level, mult in list(enumerate(self.channel_mult))[::-1]:
+            for i in range(self.num_res_blocks + 1):
+                skip_features = hs.pop()
+                
+                # 检查是否需要应用金字塔融合
+                if self.use_pyramid_fusion:
+                    fusion_key = f"level_{level}_block_{i}"
+                    if fusion_key in self.pyramid_fusion_blocks:
+                        # 应用金字塔融合增强跳跃连接
+                        enhanced_skip = self.pyramid_fusion_blocks[fusion_key](skip_features)
+                        h = th.cat([h, enhanced_skip], dim=1)
+                    else:
+                        # 使用原始跳跃连接
+                        h = th.cat([h, skip_features], dim=1)
+                else:
+                    # 使用原始跳跃连接
+                    h = th.cat([h, skip_features], dim=1)
+                
+                # 应用对应的输出块
+                h = self.output_blocks[output_block_idx](h, emb, cemb_mm)
+                output_block_idx += 1
+        
         h = h.type(x.dtype)
         return self.out(h)
 
