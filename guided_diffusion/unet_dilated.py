@@ -856,18 +856,32 @@ class UNetModel(nn.Module):
         input_block_chans = [ch]
         ds = 1
         for level, mult in enumerate(channel_mult):
-            for _ in range(num_res_blocks):
-                layers = [
-                    ResBlock(
-                        ch,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=int(mult * model_channels),
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
+            for res_idx in range(num_res_blocks):
+                # Use DilatedResBlock for the last ResBlock in 16x16 resolution layer (level=2)
+                if level == 2 and res_idx == num_res_blocks - 1:
+                    layers = [
+                        DilatedResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(mult * model_channels),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
+                else:
+                    layers = [
+                        ResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(mult * model_channels),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
                 ch = int(mult * model_channels)
                 if ds in attention_resolutions:
                     layers.append(
@@ -937,17 +951,31 @@ class UNetModel(nn.Module):
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
-                layers = [
-                    ResBlock(
-                        ch + ich,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=int(model_channels * mult),
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
+                # Use DilatedResBlock for the last ResBlock in 16x16 resolution layer (level=2)
+                if level == 2 and i == num_res_blocks - 1:
+                    layers = [
+                        DilatedResBlock(
+                            ch + ich,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(model_channels * mult),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
+                else:
+                    layers = [
+                        ResBlock(
+                            ch + ich,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(model_channels * mult),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
                 ch = int(model_channels * mult)
                 if ds in attention_resolutions:
                     layers.append(
