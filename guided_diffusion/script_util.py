@@ -71,6 +71,7 @@ def model_and_diffusion_defaults():
         use_hae=False,  # Enable/disable heterogeneous autoencoder
         bottleneck_ratio=0.25,  # Bottleneck ratio for HAE V2
         boundary_loss_weight=0.1,  # Weight for boundary-aware consistency loss (λ parameter)
+        kan_hidden_ratio=2.0,  # KAN hidden layer ratio for KAN-UNet hybrid
     )
     res.update(diffusion_defaults())
     return res
@@ -116,6 +117,7 @@ def create_model_and_diffusion(
     use_hae=False,
     bottleneck_ratio=0.25,
     boundary_loss_weight=0.1,
+    kan_hidden_ratio=2.0,
 ):
     model = create_model(
         image_size,
@@ -143,6 +145,7 @@ def create_model_and_diffusion(
         use_bottleneck_bea=use_bottleneck_bea,
         use_hae=use_hae,
         bottleneck_ratio=bottleneck_ratio,
+        kan_hidden_ratio=kan_hidden_ratio,
     )
     
     # Use dual loss diffusion for bea_dual_loss UNet version
@@ -219,6 +222,7 @@ def create_model(
     use_bottleneck_bea=False,
     use_hae=False,
     bottleneck_ratio=0.25,
+    kan_hidden_ratio=2.0,
 ):
     if channel_mult == "":
         if image_size == 512:
@@ -267,6 +271,8 @@ def create_model(
         from .unet_hae_v2 import HAEUNetModelV2 as UNetModel
     elif unet_ver == "hae_v2_conservative":
         from .unet_hae_v2_conservative import HAEUNetModelV2Conservative as UNetModel
+    elif unet_ver == "kan_hybrid":
+        from .unet_kan_hybrid import UNetKANHybridModel as UNetModel
     else:
         raise ValueError(f"unsupported unet version: {unet_ver}")
     
@@ -312,6 +318,8 @@ def create_model(
     elif unet_ver == "hae_v2_conservative":
         model_kwargs["use_hae"] = use_hae
         model_kwargs["bottleneck_ratio"] = bottleneck_ratio
+    elif unet_ver == "kan_hybrid":
+        model_kwargs["kan_hidden_ratio"] = kan_hidden_ratio
     
     return UNetModel(**model_kwargs)
 
