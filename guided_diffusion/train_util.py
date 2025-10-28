@@ -118,7 +118,7 @@ class TrainLoop:
                 output_device=dist_util.dev(),
                 broadcast_buffers=False,
                 bucket_cap_mb=128,
-                find_unused_parameters=False,
+                find_unused_parameters=False,  # 改回 False 以优化性能，KAN-UNet 混合模型参数问题已修复
             )
         else:
             if dist.get_world_size() > 1:

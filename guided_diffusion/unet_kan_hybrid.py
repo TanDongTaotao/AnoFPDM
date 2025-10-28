@@ -296,12 +296,12 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None):
+    def forward(self, x, emb, encoder_out=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, AttentionBlock):
-                x = layer(x, context)
+                x = layer(x, encoder_out)
             else:
                 x = layer(x)
         return x
@@ -596,17 +596,17 @@ class KANResBlock(TimestepBlock):
             h = out_rest(h)
         else:
             h = h + emb_out
-            
-            # Apply KAN transformation
-            B, C, H, W = h.shape
-            h_kan = self.norm_kan(h)
-            h_kan = h_kan.permute(0, 2, 3, 1).reshape(B, H*W, C)  # B, N, C
-            h_kan = self.kan_block(h_kan, H, W)
-            h_kan = h_kan.reshape(B, H, W, C).permute(0, 3, 1, 2)  # B, C, H, W
-            
-            # Residual connection for KAN
-            h = h + h_kan
             h = self.out_layers(h)
+            
+        # Apply KAN transformation (moved outside the conditional to ensure it's always used)
+        B, C, H, W = h.shape
+        h_kan = self.norm_kan(h)
+        h_kan = h_kan.permute(0, 2, 3, 1).reshape(B, H*W, C)  # B, N, C
+        h_kan = self.kan_block(h_kan, H, W)
+        h_kan = h_kan.reshape(B, H, W, C).permute(0, 3, 1, 2)  # B, C, H, W
+        
+        # Residual connection for KAN
+        h = h + h_kan
             
         return self.skip_connection(x) + h
 
@@ -634,7 +634,7 @@ class AttentionBlock(nn.Module):
             ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
-        self.norm = normalization(channels)
+        self.norm = normalization(channels, swish=0.0)
         self.qkv = conv_nd(1, channels, channels * 3, 1)
         self.attention = QKVAttention(self.num_heads)
 
@@ -795,21 +795,21 @@ class DilatedResBlock(TimestepBlock):
             h = out_rest(h)
         else:
             h = h + emb_out
-
-            # Apply parallel dilated convolutions
-            dilated_features = []
-            for conv in self.dilated_convs:
-                dilated_features.append(conv(h))
-            
-            # Concatenate and fuse
-            h_dilated = th.cat(dilated_features, dim=1)
-            h_dilated = self.fusion_conv(h_dilated)
-            h_dilated = self.fusion_norm(h_dilated)
-            h_dilated = F.silu(h_dilated)
-            
-            # Residual connection
-            h = h + h_dilated
             h = self.out_layers(h)
+
+        # Apply parallel dilated convolutions (moved outside conditional to ensure always used)
+        dilated_features = []
+        for conv in self.dilated_convs:
+            dilated_features.append(conv(h))
+        
+        # Concatenate and fuse
+        h_dilated = th.cat(dilated_features, dim=1)
+        h_dilated = self.fusion_conv(h_dilated)
+        h_dilated = self.fusion_norm(h_dilated)
+        h_dilated = F.silu(h_dilated)
+        
+        # Residual connection
+        h = h + h_dilated
 
         return self.skip_connection(x) + h
 
@@ -895,6 +895,8 @@ class UNetKANHybridModel(nn.Module):
         self.predict_codebook_ids = n_embed is not None
 
         time_embed_dim = model_channels * 4
+        encoder_channels = time_embed_dim
+        
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
@@ -975,6 +977,7 @@ class UNetKANHybridModel(nn.Module):
                                 use_checkpoint=use_checkpoint,
                                 num_heads=num_heads,
                                 num_head_channels=dim_head,
+                                encoder_channels=encoder_channels,
                             )
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -1029,6 +1032,7 @@ class UNetKANHybridModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 num_heads=num_heads,
                 num_head_channels=dim_head,
+                encoder_channels=encoder_channels,
             ),
             DilatedResBlock(  # Keep DilatedResBlock as the third component
                 ch,
@@ -1077,6 +1081,7 @@ class UNetKANHybridModel(nn.Module):
                                 use_checkpoint=use_checkpoint,
                                 num_heads=num_heads_upsample,
                                 num_head_channels=dim_head,
+                                encoder_channels=encoder_channels,
                             )
                         )
                 if level and i == num_res_blocks:
@@ -1141,33 +1146,50 @@ class UNetKANHybridModel(nn.Module):
         hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels)
         emb = self.time_embed(t_emb)
+        cemb_mm = None
 
-        # Classifier-free guidance handling
+        #-------------------------------- Condition Setup --------------------------
+        '''
+        For clf-free training, set threshold > 0
+        For clf-free sampling, set threshold = -1, and clf_free = True
+        For clf training, set threshold = -1, and clf_free = False
+        '''
         if self.num_classes is not None:
             assert y.shape[0] == x.shape[0]
+            cemb = None
+            # for clf-free training
             if threshold != -1:  # clf-free training
                 assert threshold > 0
                 cemb = self.class_emb(self.label_emb(y))
                 mask = th.rand(cemb.shape[0]) < threshold
-                cemb[th.where(mask)[0]] = 0
-                emb = emb + cemb
+                cemb[np.where(mask)[0]] = 0
+                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb)
+            # for clf-free sampling
             elif threshold == -1 and clf_free:  # clf-free sampling
                 if null:  # null embedding
                     cemb = th.zeros_like(emb)
                 else:  # class condition embedding
                     cemb = self.class_emb(self.label_emb(y))
-                emb = emb + cemb
-            elif threshold == -1 and not clf_free:  # non-clf-free condition
-                emb = emb + self.label_emb(y)
+                cemb_mm = th.einsum("ab,ac -> abc", cemb, cemb)
+            # for non-clf-free condition embedding, e.g., classifier guided sampling
+            # elif threshold == -1 and not clf_free:
+            #     cemb = self.label_emb(y)
+            else:
+                raise Exception("Invalid condition setup")
+                
+            assert cemb is not None
+            assert cemb_mm is not None
+            emb = emb + cemb
+        #-------------------------------- Condition Setup --------------------------
 
         h = x.type(self.dtype)
         for module in self.input_blocks:
-            h = module(h, emb, context)
+            h = module(h, emb, cemb_mm)
             hs.append(h)
-        h = self.middle_block(h, emb, context)
+        h = self.middle_block(h, emb, cemb_mm)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context)
+            h = module(h, emb, cemb_mm)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)
@@ -1288,6 +1310,7 @@ class EncoderUNetKANHybridModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             num_heads=num_heads,
                             num_head_channels=dim_head,
+                            encoder_channels=encoder_channels,
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -1340,6 +1363,7 @@ class EncoderUNetKANHybridModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 num_heads=num_heads,
                 num_head_channels=dim_head,
+                encoder_channels=encoder_channels,
             ),
             DilatedResBlock(  # Keep DilatedResBlock as the third component
                 ch,

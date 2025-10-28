@@ -163,12 +163,6 @@ def create_argparser():
         help="threshold for clf-free training",
         default=-1.0,  # disabled in default
     )
-    parser.add_argument(
-        "--kan_hidden_ratio",
-        type=float,
-        help="KAN hidden layer ratio",
-        default=4.0,
-    )
     add_dict_to_argparser(parser, defaults)
     return parser
 
