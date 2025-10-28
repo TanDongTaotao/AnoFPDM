@@ -924,7 +924,7 @@ class UNetModel(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         clf_free=True,
-        use_pyramid_fusion=False,  # 新增：是否启用多尺度金字塔融合
+        use_pyramid_fusion=True,  # 新增：是否启用多尺度金字塔融合
         pyramid_fusion_levels=None,  # 新增：指定在哪些层级启用金字塔融合
     ):
         super().__init__()
@@ -1119,11 +1119,12 @@ class UNetModel(nn.Module):
         self.input_block_chans = input_block_chans_copy
         
         if use_pyramid_fusion:
-            # 如果未指定层级，默认先在16×16分辨率启用（保守策略）
+            # 如果未指定层级，默认在16×16和32×32分辨率启用金字塔融合
             if pyramid_fusion_levels is None:
                 # 根据 channel_mult 确定关键层级
-                # 通常 16×16 对应 level 2，先从这个分辨率开始验证
-                pyramid_fusion_levels = [2] if len(channel_mult) > 2 else [1]
+                # Level 2: 32×32分辨率, Level 3: 16×16分辨率
+                # 同时在这两个层级启用金字塔融合以增强多尺度特征提取
+                pyramid_fusion_levels = [2, 3] if len(channel_mult) > 3 else [2] if len(channel_mult) > 2 else [1]
             
             # 为每个指定的层级创建金字塔融合模块
             output_block_idx = 0
