@@ -907,7 +907,7 @@ class UNetModel(nn.Module):
 
         # Modified middle_block with DilatedResBlock
         self.middle_block = TimestepEmbedSequential(
-            ResBlock(
+            DilatedResBlock(  # Replace first ResBlock with DilatedResBlock
                 ch,
                 time_embed_dim,
                 dropout,
