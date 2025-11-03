@@ -282,7 +282,7 @@ class DirectionalSEBlock(nn.Module):
     :param num_dilation_branches: Number of dilation rate branches (e.g., 3 for dilation rates 2, 4, 8)
     :param reduction: Reduction ratio for SE attention
     """
-    def __init__(self, channels_per_direction, num_dilation_branches=3, reduction=16, extra_channels=0):
+    def __init__(self, channels_per_direction, num_dilation_branches=2, reduction=16, extra_channels=0):
         super().__init__()
         self.channels_per_direction = channels_per_direction
         self.num_dilation_branches = num_dilation_branches
@@ -528,29 +528,27 @@ class DilatedResBlock(TimestepBlock):
         )
 
         # Enhanced parallel dilated convolutions with directional support
-        # Calculate channels per branch to ensure exact division
-        base_channels = self.out_channels // 3
-        remaining_channels = self.out_channels - 3 * base_channels
+        # Calculate channels per branch to ensure exact division (dual branch: 1, 2)
+        base_channels = self.out_channels // 2
+        remaining_channels = self.out_channels - 2 * base_channels
         
         if self.use_directional:
             # Use directional dilated convolutions
-            self.dilated_conv_2 = DirectionalDilatedConv(channels, base_channels, dilation=2, dims=dims)
-            self.dilated_conv_4 = DirectionalDilatedConv(channels, base_channels, dilation=4, dims=dims)
+            self.dilated_conv_1 = DirectionalDilatedConv(channels, base_channels, dilation=1, dims=dims)
             
             # Add remaining channels to the last branch
             last_branch_channels = base_channels + remaining_channels
-            self.dilated_conv_8 = DirectionalDilatedConv(channels, last_branch_channels, dilation=8, dims=dims)
+            self.dilated_conv_2 = DirectionalDilatedConv(channels, last_branch_channels, dilation=2, dims=dims)
             
             # Get channel information for DirectionalSEBlock directly from the conv layer
-            self.channels_per_direction = self.dilated_conv_2.channels_per_direction
+            self.channels_per_direction = self.dilated_conv_1.channels_per_direction
         else:
             # Use standard dilated convolutions (fallback)
-            self.dilated_conv_2 = conv_nd(dims, channels, base_channels, 3, padding=2, dilation=2)
-            self.dilated_conv_4 = conv_nd(dims, channels, base_channels, 3, padding=4, dilation=4)
+            self.dilated_conv_1 = conv_nd(dims, channels, base_channels, 3, padding=1, dilation=1)
             
             # Add remaining channels to the last branch
             last_branch_channels = base_channels + remaining_channels
-            self.dilated_conv_8 = conv_nd(dims, channels, last_branch_channels, 3, padding=8, dilation=8)
+            self.dilated_conv_2 = conv_nd(dims, channels, last_branch_channels, 3, padding=2, dilation=2)
             self.channels_per_direction = None
         
         # No extra conv needed since we handle remaining channels in the last branch
@@ -569,7 +567,7 @@ class DilatedResBlock(TimestepBlock):
                 # Use DirectionalSEBlock for enhanced directional attention
                 self.se_block = DirectionalSEBlock(
                     channels_per_direction=self.channels_per_direction,
-                    num_dilation_branches=3,  # 3 dilation rates: 2, 4, 8
+                    num_dilation_branches=2,  # 2 dilation rates: 1, 2
                     reduction=16,
                     extra_channels=remaining_channels  # Pass the extra channels to the last branch
                 )
@@ -624,24 +622,22 @@ class DilatedResBlock(TimestepBlock):
         # Parallel dilated convolutions (directional or standard)
         if self.use_directional and self.use_directional_se_block:
             # Use directional convolutions with separate outputs for DirectionalSEBlock
+            h1, _ = self.dilated_conv_1.forward_directional(h)
             h2, _ = self.dilated_conv_2.forward_directional(h)
-            h4, _ = self.dilated_conv_4.forward_directional(h)
-            h8, _ = self.dilated_conv_8.forward_directional(h)
             
             # Prepare features list for DirectionalSEBlock
-            directional_features_list = [h2, h4, h8]
+            directional_features_list = [h1, h2]
             
             # Apply DirectionalSEBlock before fusion
             h = self.se_block(directional_features_list)
             
         else:
             # Standard approach: concatenate first, then apply SE
+            h1 = self.dilated_conv_1(h)
             h2 = self.dilated_conv_2(h)
-            h4 = self.dilated_conv_4(h)
-            h8 = self.dilated_conv_8(h)
             
-            # Concatenate dilated features (h8 already includes remaining channels)
-            h = th.cat([h2, h4, h8], dim=1)
+            # Concatenate dilated features (h2 already includes remaining channels)
+            h = th.cat([h1, h2], dim=1)
             
             # Multi-scale fusion with normalization
             h = self.fusion(h)
@@ -1030,7 +1026,7 @@ class UNetModel(nn.Module):
 
         # Modified middle_block with DilatedResBlock
         self.middle_block = TimestepEmbedSequential(
-            ResBlock(
+            DilatedResBlock(  # Replace first ResBlock with DilatedResBlock
                 ch,
                 time_embed_dim,
                 dropout,
@@ -1122,9 +1118,9 @@ class UNetModel(nn.Module):
             # 如果未指定层级，默认在16×16和32×32分辨率启用金字塔融合
             if pyramid_fusion_levels is None:
                 # 根据 channel_mult 确定关键层级
-                # Level 2: 32×32分辨率, Level 3: 16×16分辨率
-                # 同时在这两个层级启用金字塔融合以增强多尺度特征提取
-                pyramid_fusion_levels = [2, 3] if len(channel_mult) > 3 else [2] if len(channel_mult) > 2 else [1]
+                # Level 1: 64×64分辨率 - 使用金字塔融合增强高分辨率特征提取
+                # Level 2: 32×32分辨率, Level 3: 16×16分辨率 - 使用简约跳跃连接
+                pyramid_fusion_levels = [1] if len(channel_mult) > 2 else []
             
             # 为每个指定的层级创建金字塔融合模块
             output_block_idx = 0
@@ -1378,7 +1374,7 @@ class EncoderUNetModel(nn.Module):
                 self._feature_size += ch
 
         self.middle_block = TimestepEmbedSequential(
-            ResBlock(
+            DilatedResBlock(  # Replace first ResBlock with DilatedResBlock
                 ch,
                 time_embed_dim,
                 dropout,
@@ -1393,7 +1389,7 @@ class EncoderUNetModel(nn.Module):
                             num_head_channels=num_head_channels,
                             encoder_channels=encoder_channels,
                         ),
-            ResBlock(
+            DilatedResBlock(  # Replace second ResBlock with DilatedResBlock
                 ch,
                 time_embed_dim,
                 dropout,
