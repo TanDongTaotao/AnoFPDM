@@ -6,7 +6,7 @@ import numpy as np
 import torch.distributed as dist
 import torch
 
-from common import read_model_and_diffusion
+from common import read_model_and_diffusion, set_seed_for_reproducibility
 from guided_diffusion import dist_util, logger
 from guided_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -27,6 +27,8 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
+    # 设置推理随机种子，保证结果可复现
+    set_seed_for_reproducibility(args.seed)
     logger.configure()
 
     logger.log(f"args: {args}")
