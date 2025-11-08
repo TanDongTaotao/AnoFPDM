@@ -688,15 +688,17 @@ class PyramidFusionBlock(nn.Module):
         dims=2,            # 空间维度
         dilation_rates=(1, 3, 5),  # 膨胀率组合
         reduction=8,       # 注意力机制的降维比例
-        use_checkpoint=False
+        use_checkpoint=False,
+        num_heads=1,
     ):
         super().__init__()
-        
+
         self.skip_channels = skip_channels
         self.current_channels = current_channels
         self.dims = dims
         self.dilation_rates = dilation_rates
         self.use_checkpoint = use_checkpoint
+        self.num_heads = num_heads
         
         # 计算每个分组的通道数
         self.group_channels = skip_channels // len(dilation_rates)
@@ -735,26 +737,41 @@ class PyramidFusionBlock(nn.Module):
         
         # 输出投影层（保持跳跃连接的通道数不变）
         self.output_proj = conv_nd(dims, fused_channels, skip_channels, kernel_size=1)
-        
+
         # 残差连接保持原始通道数
         self.skip_proj = nn.Identity()
+
+        # 交叉注意力：以融合后的跳跃特征为 Query，以当前层特征为 Encoder K/V
+        # 输出维持为 skip_channels，便于与原始跳跃特征做残差并与解码特征拼接
+        self.cross_attn = AttentionBlock(
+            channels=skip_channels,
+            num_heads=self.num_heads,
+            num_head_channels=-1,
+            use_checkpoint=False,
+            encoder_channels=current_channels,
+        )
     
-    def forward(self, skip_features):
+    def forward(self, skip_features, current_features):
         """
         前向传播
         
         Args:
             skip_features: 来自编码器的跳跃连接特征 [B, skip_channels, H, W]
+            current_features: 当前解码层特征 [B, current_channels, H, W]
             
         Returns:
-            enhanced_features: 增强后的特征 [B, current_channels, H, W]
+            enhanced_features: 增强后的跳跃特征 [B, skip_channels, H, W]
         """
         if self.use_checkpoint:
-            return checkpoint(self._forward, skip_features)
+            return checkpoint(self._forward, skip_features, current_features)
         else:
-            return self._forward(skip_features)
-    
-    def _forward(self, skip_features):
+            return self._forward(skip_features, current_features)
+
+    def _forward(self, skip_features, current_features):
+        # 对齐 dtype 以避免混合精度下的类型不一致
+        current_features = current_features.type(skip_features.dtype)
+        skip_features = skip_features.type(current_features.dtype)
+
         B, C, *spatial_dims = skip_features.shape
         
         # 1. 特征分组
@@ -777,14 +794,19 @@ class PyramidFusionBlock(nn.Module):
         # 5. 自适应注意力加权
         attention_weights = self.attention(fused_features)
         attended_features = fused_features * attention_weights
-        
-        # 6. 输出投影
-        output = self.output_proj(attended_features)
-        
-        # 7. 残差连接
+
+        # 6. 交叉注意力（Query: 融合后的跳跃特征，KV: 当前层特征）
+        # 将当前层特征展平为序列以供 Encoder KV 使用
+        encoder_tokens = current_features.view(B, self.current_channels, -1)
+        cross_attended = self.cross_attn(attended_features, encoder_out=encoder_tokens)
+
+        # 7. 输出投影
+        output = self.output_proj(cross_attended)
+
+        # 8. 残差连接
         residual = self.skip_proj(skip_features)
         enhanced_features = output + residual
-        
+
         return enhanced_features
 
 
@@ -1140,7 +1162,8 @@ class UNetModel(nn.Module):
                                 dims=dims,
                                 dilation_rates=(1, 3),  # 使用2个膨胀率
                                 reduction=8,
-                                use_checkpoint=use_checkpoint
+                                use_checkpoint=use_checkpoint,
+                                num_heads=self.num_heads_upsample,
                             )
                     output_block_idx += 1
         
@@ -1235,7 +1258,7 @@ class UNetModel(nn.Module):
                     fusion_key = f"level_{level}_block_{i}"
                     if fusion_key in self.pyramid_fusion_blocks:
                         # 应用金字塔融合增强跳跃连接
-                        enhanced_skip = self.pyramid_fusion_blocks[fusion_key](skip_features)
+                        enhanced_skip = self.pyramid_fusion_blocks[fusion_key](skip_features, h)
                         h = th.cat([h, enhanced_skip], dim=1)
                     else:
                         # 使用原始跳跃连接
