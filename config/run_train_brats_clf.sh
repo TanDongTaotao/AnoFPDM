@@ -1,44 +1,34 @@
 #!/bin/bash
 
-#SBATCH --job-name='clf'
-#SBATCH --nodes=1                       
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:a100:1
-#SBATCH --mem=16G
-#SBATCH -p general                
-#SBATCH -q public
-            
-#SBATCH -t 01-10:00:00               
-            
-#SBATCH -e ./slurm_out/slurm.%j.err
-#SBATCH -o ./slurm_out/slurm.%j.out
+# 此脚本已修改为单机单卡 Linux 环境运行，无 SLURM 依赖。
+# 运行前请先激活 conda 环境，例如：`conda activate your_env_name`
+# 或者取消下面注释以使用已有环境：
+# source activate torch
 
+# --- 路径配置 ---
+DATA_ROOT="./data"   # 请修改为你的数据根目录
+LOG_ROOT="./logs"    # 请修改为你的日志/权重保存目录
 
-module purge
-module load mamba/latest
-source activate torch_base
+# --- 分布式参数（单机单卡） ---
+export MASTER_ADDR=localhost
+export MASTER_PORT=12355  # 使用不冲突的端口
 
+# --- 模型与训练参数 ---
 num_classes=2
 image_size=128
 version=v1
 in_channels=4
 
-
-master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_ADDR=$master_addr
-echo $MASTER_ADDR
-
-export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
-echo $MASTER_PORT
-
-export OPENAI_LOGDIR="./logs/clf"
-echo $OPENAI_LOGDIR
+# --- 日志与输出目录 ---
+export OPENAI_LOGDIR="${LOG_ROOT}/clf"
+mkdir -p "$OPENAI_LOGDIR"
+echo "日志将保存在: $OPENAI_LOGDIR"
 
 image_dir="$OPENAI_LOGDIR/images"
+mkdir -p "$image_dir"
 
-data_dir="/data/preprocessed_data"
-
+# --- 数据目录 ---
+data_dir="${DATA_ROOT}/preprocessed_data"  # 请根据实际数据子路径调整
 
 CLASSIFIER_FLAGS="--unet_ver $version --image_size $image_size --classifier_attention_resolutions 32,16,8 \
                 --in_channels $in_channels --out_channels $num_classes \
@@ -49,8 +39,10 @@ CLASSIFIER_FLAGS="--unet_ver $version --image_size $image_size --classifier_atte
 
 NUM_GPUS=1
 torchrun --nproc-per-node $NUM_GPUS \
-         --nnodes=1\
-         --rdzv-backend=c10d\
-         --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT\
-        ./scripts/train_classifier.py --name brats --save_interval 10000\
-                                    $CLASSIFIER_FLAGS
+         --nnodes=1 \
+         --rdzv-backend=c10d \
+         --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT \
+         ./scripts/train_classifier.py --name brats --save_interval 10000 \
+         $CLASSIFIER_FLAGS
+
+echo "脚本执行完成。"

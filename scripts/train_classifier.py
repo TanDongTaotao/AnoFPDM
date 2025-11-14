@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import contextlib
 sys.path.append(os.path.realpath('./'))
 
 import blobfile as bf
@@ -54,21 +55,13 @@ def main():
                 )
             )
 
-    # Needed for creating correct EMAs and fp16 parameters.
-    dist_util.sync_params(model.parameters())
+    # 单卡训练：不进行分布式参数同步。
 
     mp_trainer = MixedPrecisionTrainer(
         model=model, use_fp16=args.classifier_use_fp16, initial_lg_loss_scale=16.0
     )
     
-    model = DDP(
-        model,
-        device_ids=[dist_util.dev()],
-        output_device=dist_util.dev(),
-        broadcast_buffers=False,
-        bucket_cap_mb=128,
-        find_unused_parameters=False,
-    )
+    # 单卡训练：不使用 DDP 包裹模型，直接原生模型训练。
 
     logger.log("creating data loader...")
 
@@ -160,9 +153,10 @@ def main():
 
     for step in range(args.iterations - resume_step):
         logger.logkv("step", step + resume_step)
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
         logger.logkv(
             "samples",
-            (step + resume_step + 1) * args.batch_size * dist.get_world_size(),
+            (step + resume_step + 1) * args.batch_size * world_size,
         )
         if args.anneal_lr:
             set_annealed_lr(opt, args.lr, (step + resume_step) / args.iterations)
@@ -171,7 +165,9 @@ def main():
         
         if val_data is not None and not step % args.eval_interval:
             with th.no_grad():
-                with model.no_sync():
+                # 单卡或非 DDP 情况下，没有 no_sync，上下文回退为空上下文。
+                no_sync_ctx = getattr(model, "no_sync", contextlib.nullcontext)
+                with no_sync_ctx():
                     model.eval()
                     forward_backward_log(val_data, prefix="val")
                     model.train()
@@ -180,16 +176,17 @@ def main():
             logger.dumpkvs()
         if (
             step
-            and dist.get_rank() == 0
+            and (not dist.is_initialized() or dist.get_rank() == 0)
             and not (step + resume_step) % args.save_interval
         ):
             logger.log("saving model...")
             save_model(mp_trainer, opt, step + resume_step)
 
-    if dist.get_rank() == 0:
+    if (not dist.is_initialized()) or dist.get_rank() == 0:
         logger.log("saving model...")
         save_model(mp_trainer, opt, step + resume_step)
-    dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
 
 
 def set_annealed_lr(opt, base_lr, frac_done):
@@ -199,7 +196,7 @@ def set_annealed_lr(opt, base_lr, frac_done):
 
 
 def save_model(mp_trainer, opt, step):
-    if dist.get_rank() == 0:
+    if (not dist.is_initialized()) or dist.get_rank() == 0:
         th.save(
             mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
             os.path.join(logger.get_dir(), f"model{step:06d}.pt"),

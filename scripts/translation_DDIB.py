@@ -6,7 +6,7 @@ import numpy as np
 import torch.distributed as dist
 import torch
 
-from common import read_model_and_diffusion
+from common import read_model_and_diffusion, set_seed_for_reproducibility
 from guided_diffusion import dist_util, logger
 from guided_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -23,11 +23,44 @@ from obtain_hyperpara import obtain_optimal_threshold, get_mask_batch
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 
 
+# Helper functions to make distributed calls safe on single-GPU setups
+# 辅助函数：在单机单卡环境下安全地调用分布式接口
+def _safe_get_rank():
+    # Return current rank if initialized, else 0
+    # 如果分布式未初始化，返回 0 作为默认 rank
+    return dist.get_rank() if dist.is_initialized() else 0
+
+
+def _safe_get_world_size():
+    # Return world size if initialized, else 1
+    # 如果分布式未初始化，返回 1 作为默认 world size
+    return dist.get_world_size() if dist.is_initialized() else 1
+
+
+def _safe_barrier():
+    # Barrier only when initialized
+    # 仅在分布式初始化后才执行同步屏障
+    if dist.is_initialized():
+        dist.barrier()
+
+
+def _safe_all_gather(output_list, tensor):
+    # All-gather on initialized group, else just place local tensor
+    # 如果分布式未初始化，仅返回本地张量的列表包裹
+    if dist.is_initialized():
+        dist.all_gather(output_list, tensor)
+    else:
+        output_list[:] = [tensor]
+
+
 def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
     logger.configure()
+    # Set global random seed for reproducibility (PyTorch/NumPy/CUDA/CuDNN)
+    # 设置全局随机种子以保证可复现（覆盖 PyTorch/NumPy/CUDA/CuDNN）
+    set_seed_for_reproducibility(args.seed)
 
     logger.log(f"args: {args}")
     logger.log("starting to sample.")
@@ -43,6 +76,9 @@ def main():
     model, diffusion = read_model_and_diffusion(
         args, args.model_dir, args.model_num, args.ema
     )
+    # Set model to eval mode for inference
+    # 推理阶段将模型置于评估模式
+    model.eval()
 
     data_test = get_data_iter(
         args.name,
@@ -55,14 +91,17 @@ def main():
         use_weighted_sampler=args.use_weighted_sampler,
     )
 
-    model = DDP(
-        model,
-        device_ids=[dist_util.dev()],
-        output_device=dist_util.dev(),
-        broadcast_buffers=False,
-        bucket_cap_mb=128,
-        find_unused_parameters=False,
-    )
+    # Wrap with DDP only if distributed is initialized
+    # 仅在分布式环境初始化后使用 DDP 包裹模型
+    if dist.is_initialized():
+        model = DDP(
+            model,
+            device_ids=[dist_util.dev()],
+            output_device=dist_util.dev(),
+            broadcast_buffers=False,
+            bucket_cap_mb=128,
+            find_unused_parameters=False,
+        )
 
     if args.num_batches_val != 0:
         data_val = get_data_iter(
@@ -112,32 +151,34 @@ def main():
         Y.append(lab)
 
         logger.log(
-            f"translating at batch {k} on rank {dist.get_rank()}, shape {source.shape}..."
+            f"translating at batch {k} on rank {_safe_get_rank()}, shape {source.shape}..."
         )
 
         source = source.to(dist_util.dev())
         mask = mask.to(dist_util.dev())
 
         logger.log(
-            f"source with mean {source.mean()} and std {source.std()} on rank {dist.get_rank()}"
+            f"source with mean {source.mean()} and std {source.std()} on rank {_safe_get_rank()}"
         )
 
         noise, _ = sample(
             model,
             diffusion,
             noise=source,
-            reverse=True,
-            null=True,
+            reverse=True,  # DDIM reverse: deterministic encoding to latent
+            null=True,     # Use null class for encoding
             sample_steps=args.sample_steps,
             dynamic_clip=args.dynamic_clip,
             ddpm=False,
             normalize_img=False,
         )
+        # Prepare target class labels (0 for healthy)
+        # 准备目标类别标签（0 表示健康）
         y0 = torch.ones(source.shape[0], dtype=torch.long) * torch.arange(
             start=0, end=1
         ).reshape(
             -1, 1
-        )  # 0 for healthy
+        )  # 0 for healthy / 0 表示健康类
         y0 = y0.reshape(-1, 1).squeeze().to(dist_util.dev())
 
         target, _ = sample(
@@ -170,27 +211,18 @@ def main():
 
         if args.save_data:
             logger.log("collecting metrics...")
-            gathered_source = [
-                torch.zeros_like(source) for _ in range(dist.get_world_size())
-            ]
-            gathered_latent = [
-                torch.zeros_like(noise) for _ in range(dist.get_world_size())
-            ]
-            gathered_target = [
-                torch.zeros_like(target) for _ in range(dist.get_world_size())
-            ]
-            gathered_mask = [
-                torch.zeros_like(mask) for _ in range(dist.get_world_size())
-            ]
-            gathered_pred_maps = [
-                torch.zeros_like(pred_map) for _ in range(dist.get_world_size())
-            ]
+            world_size = _safe_get_world_size()
+            gathered_source = [torch.zeros_like(source) for _ in range(world_size)]
+            gathered_latent = [torch.zeros_like(noise) for _ in range(world_size)]
+            gathered_target = [torch.zeros_like(target) for _ in range(world_size)]
+            gathered_mask = [torch.zeros_like(mask) for _ in range(world_size)]
+            gathered_pred_maps = [torch.zeros_like(pred_map) for _ in range(world_size)]
 
-            dist.all_gather(gathered_source, source)
-            dist.all_gather(gathered_latent, noise)
-            dist.all_gather(gathered_target, target)
-            dist.all_gather(gathered_mask, mask)
-            dist.all_gather(gathered_pred_maps, pred_map)
+            _safe_all_gather(gathered_source, source)
+            _safe_all_gather(gathered_latent, noise)
+            _safe_all_gather(gathered_target, target)
+            _safe_all_gather(gathered_mask, mask)
+            _safe_all_gather(gathered_pred_maps, pred_map)
 
             all_sources.extend([source.cpu().numpy() for source in gathered_source])
             all_latents.extend([noise.cpu().numpy() for noise in gathered_latent])
@@ -220,8 +252,8 @@ def main():
             all_pred_maps_path = os.path.join(image_subfolder, f"pred_map_{k}.npy")
             np.save(all_pred_maps_path, all_pred_maps)
 
-    dist.barrier()
-    logger.log(f"synthetic data translation complete")
+    _safe_barrier()
+    logger.log(f"synthetic data translation complete")  # 合成域到目标域的翻译完成
 
 
 def create_argparser():
