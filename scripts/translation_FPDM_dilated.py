@@ -16,7 +16,7 @@ from guided_diffusion.script_util import (
 )
 
 from data import get_data_iter
-from obtain_hyperpara import obtain_hyperpara, get_mask_batch_FPDM, get_mask_batch_FPDM_dual_threshold, get_mask_batch_FPDM_with_snr_weighting
+from obtain_hyperpara import obtain_hyperpara, get_mask_batch_FPDM, get_mask_batch_FPDM_dual_threshold
 from evaluate import get_stats, evaluate, logging_metrics
 
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
