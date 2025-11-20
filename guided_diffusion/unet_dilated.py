@@ -824,23 +824,20 @@ class ASSSFSkipFusion(nn.Module):
         skip_channels: int,
         current_channels: int,
         time_embed_dim: int,
-        include_class_cond: bool = False,
-        gate_hidden_dim: int = 128,
-        dims: int = 2,
-        use_freq: bool = True,
-        use_boundary: bool = True,
-        use_boundary_in_cond: bool = False,  # 新增：是否在门控条件中使用边界标量（默认关闭）
-        # 新增：弱化门控与近似恒等的控制参数
-        residual_alpha: float = 0.3,        # 残差融合强度（越小越接近恒等）
-        gate_temperature: float = 2.0,      # 门控温度（增大则更平缓）
-        gate_limit_min: float = 0.1,        # 门控下限（避免极端关闭）
-        gate_limit_max: float = 0.9,        # 门控上限（避免极端开启）
-        # 新增：更平滑的低通核设置
-        lowpass_kernel_size: int = 5,
-        lowpass_sigma: float = 1.2,
-        # 新增：边界权重平滑与下调
-        boundary_smooth_kernel_size: int = 5,
-        boundary_weight_scale: float = 0.5,
+        include_class_cond: bool = False,          # 是否使用类别条件（关闭以提升稳定性）
+        gate_hidden_dim: int = 128,                # 门控 MLP 隐藏维度
+        dims: int = 2,                             # 特征维度，当前实现仅支持 2D
+        use_freq: bool = True,                     # 是否进行低/高频分解融合
+        use_boundary: bool = True,                 # 是否启用边界加权融合
+        use_boundary_in_cond: bool = False,        # 边界标量是否加入门控条件
+        residual_alpha: float = 0.1,               # 残差融合强度，越小越接近恒等
+        gate_temperature: float = 3.0,             # 门控温度，增大则输出更平缓
+        gate_limit_min: float = 0.0,               # 门控下限（允许完全关闭）
+        gate_limit_max: float = 1.0,               # 门控上限（允许完全打开）
+        lowpass_kernel_size: int = 3,              # 低通核大小（更温和）
+        lowpass_sigma: float = 0.8,                # 低通高斯 sigma（更温和）
+        boundary_smooth_kernel_size: int = 5,      # 边界权重平滑核大小
+        boundary_weight_scale: float = 0.25,       # 边界权重整体缩放（降低影响）
     ):
         super().__init__()
         assert dims == 2, "当前实现仅支持 2D 特征"
@@ -858,13 +855,22 @@ class ASSSFSkipFusion(nn.Module):
         self.gate_limit_min = gate_limit_min
         self.gate_limit_max = gate_limit_max
 
-        # 条件向量维度：t_emb + （可选）c_emb + 当前层全局上下文 + 边界描述符（标量）
-        cond_dim = time_embed_dim + (time_embed_dim if include_class_cond else 0) + current_channels + (1 if use_boundary_in_cond else 0)
+        self.ctx_proj = linear(current_channels, time_embed_dim)  # 上下文通道投影到 time_embed_dim，匹配尺度
+        cond_dim = time_embed_dim + (time_embed_dim if include_class_cond else 0) + time_embed_dim + (1 if use_boundary_in_cond else 0)
+        self.cond_norm = nn.LayerNorm(cond_dim)  # 条件拼接后做层归一化，稳定门控输出
         self.gate_mlp = nn.Sequential(
             linear(cond_dim, gate_hidden_dim),
             nn.SiLU(),
             linear(gate_hidden_dim, skip_channels * 4),  # gate, gamma, beta, w_high
         )
+        with th.no_grad():
+            mlp_out = self.gate_mlp[-1]
+            if hasattr(mlp_out, 'bias') and mlp_out.bias is not None:
+                bias = mlp_out.bias
+                bias[:skip_channels] = -9.0
+                bias[skip_channels:2*skip_channels] = 3.0
+                bias[2*skip_channels:3*skip_channels] = 0.0
+                bias[3*skip_channels:] = -9.0
 
         # 更平滑的频域低通：使用固定的高斯深度可分离卷积（每通道独立）
         k = lowpass_kernel_size
@@ -920,6 +926,7 @@ class ASSSFSkipFusion(nn.Module):
         # 当前层全局上下文（GAP）
         # 使用实际通道数进行展平，确保兼容不同层的上下文通道
         ctx = F.adaptive_avg_pool2d(cur, 1).flatten(1)
+        ctx = self.ctx_proj(ctx)
 
         # 边界描述符：仅在启用 use_boundary_in_cond 时参与门控条件
         if self.use_boundary and self.use_boundary_in_cond:
@@ -941,6 +948,7 @@ class ASSSFSkipFusion(nn.Module):
                 cond = th.cat([t_emb, ctx, b_desc], dim=-1)
             else:
                 cond = th.cat([t_emb, ctx], dim=-1)
+        cond = self.cond_norm(cond)  # 归一化不同来源条件的尺度
 
         # 产生 gate/gamma/beta/w_high（通道维度）
         gate_params = self.gate_mlp(cond)  # [B, C_skip*4]
@@ -1365,11 +1373,19 @@ class UNetModel(nn.Module):
                             skip_channels=skip_ch,
                             current_channels=current_ch,
                             time_embed_dim=time_embed_dim,
-                            include_class_cond=(self.num_classes is not None),
+                            include_class_cond=False,
                             gate_hidden_dim=as_ssf_gate_dim,
                             dims=dims,
                             use_freq=True,
                             use_boundary=True,
+                            use_boundary_in_cond=True,
+                            residual_alpha=0.1,
+                            gate_temperature=3.0,
+                            gate_limit_min=0.0,
+                            gate_limit_max=1.0,
+                            lowpass_kernel_size=3,
+                            lowpass_sigma=0.8,
+                            boundary_weight_scale=0.25,
                         )
                     # 更新跟踪通道为该层目标输出通道（与构建 output_blocks 的逻辑一致）
                     ch_tracker = int(model_channels * mult)
@@ -1464,10 +1480,7 @@ class UNetModel(nn.Module):
                 fusion_key = f"level_{level}_block_{i}"
                 # 优先使用 AS-SSF；如未启用或缺少该层，则回退到原始或金字塔融合
                 if self.use_as_ssf and fusion_key in self.as_ssf_blocks:
-                    cemb_opt = None
-                    if self.num_classes is not None:
-                        cemb_opt = cemb
-                    enhanced_skip = self.as_ssf_blocks[fusion_key](skip_features, h, emb, cemb_opt)
+                    enhanced_skip = self.as_ssf_blocks[fusion_key](skip_features, h, emb, None)
                     h = th.cat([h, enhanced_skip], dim=1)
                 elif self.use_pyramid_fusion and fusion_key in self.pyramid_fusion_blocks:
                     enhanced_skip = self.pyramid_fusion_blocks[fusion_key](skip_features, h)
