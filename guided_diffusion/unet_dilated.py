@@ -829,6 +829,7 @@ class ASSSFSkipFusion(nn.Module):
         dims: int = 2,
         use_freq: bool = True,
         use_boundary: bool = True,
+        use_boundary_in_cond: bool = False,  # 新增：是否在门控条件中使用边界标量（默认关闭）
         # 新增：弱化门控与近似恒等的控制参数
         residual_alpha: float = 0.3,        # 残差融合强度（越小越接近恒等）
         gate_temperature: float = 2.0,      # 门控温度（增大则更平缓）
@@ -849,6 +850,7 @@ class ASSSFSkipFusion(nn.Module):
         self.include_class_cond = include_class_cond
         self.use_freq = use_freq
         self.use_boundary = use_boundary
+        self.use_boundary_in_cond = use_boundary_in_cond
 
         # 残差融合与门控控制参数
         self.residual_alpha = residual_alpha
@@ -857,7 +859,7 @@ class ASSSFSkipFusion(nn.Module):
         self.gate_limit_max = gate_limit_max
 
         # 条件向量维度：t_emb + （可选）c_emb + 当前层全局上下文 + 边界描述符（标量）
-        cond_dim = time_embed_dim + (time_embed_dim if include_class_cond else 0) + current_channels + 1
+        cond_dim = time_embed_dim + (time_embed_dim if include_class_cond else 0) + current_channels + (1 if use_boundary_in_cond else 0)
         self.gate_mlp = nn.Sequential(
             linear(cond_dim, gate_hidden_dim),
             nn.SiLU(),
@@ -919,20 +921,26 @@ class ASSSFSkipFusion(nn.Module):
         # 使用实际通道数进行展平，确保兼容不同层的上下文通道
         ctx = F.adaptive_avg_pool2d(cur, 1).flatten(1)
 
-        # 边界描述符：通道平均的局部均值差绝对值，再做全局平均得到标量
-        if self.use_boundary:
-            local_mean = self.avg_pool(skip)
+        # 边界描述符：仅在启用 use_boundary_in_cond 时参与门控条件
+        if self.use_boundary and self.use_boundary_in_cond:
+            local_mean = self.lowpass_conv(skip)
             boundary_map = (skip - local_mean).abs().mean(dim=1, keepdim=True)  # [B,1,H,W]
             b_desc = F.adaptive_avg_pool2d(boundary_map, 1).view(b, 1)  # [B,1]
         else:
-            b_desc = th.zeros(b, 1, dtype=dtype, device=skip.device)
+            b_desc = None
 
         # 条件拼接
         if self.include_class_cond:
             assert c_emb is not None, "启用了类别条件，但未提供 c_emb"
-            cond = th.cat([t_emb, c_emb, ctx, b_desc], dim=-1)
+            if b_desc is not None:
+                cond = th.cat([t_emb, c_emb, ctx, b_desc], dim=-1)
+            else:
+                cond = th.cat([t_emb, c_emb, ctx], dim=-1)
         else:
-            cond = th.cat([t_emb, ctx, b_desc], dim=-1)
+            if b_desc is not None:
+                cond = th.cat([t_emb, ctx, b_desc], dim=-1)
+            else:
+                cond = th.cat([t_emb, ctx], dim=-1)
 
         # 产生 gate/gamma/beta/w_high（通道维度）
         gate_params = self.gate_mlp(cond)  # [B, C_skip*4]
