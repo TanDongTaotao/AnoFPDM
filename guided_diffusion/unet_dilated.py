@@ -775,6 +775,12 @@ class UNetModel(nn.Module):
                                of heads for upsampling. Deprecated.
     :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
     :param resblock_updown: use residual blocks for up/downsampling.
+    :param dilated_resblock_resolutions: set/list of downsample rates (ds) where
+        standard ResBlock is replaced by DilatedResBlock in encoder/decoder.
+        ds is the spatial downsample factor relative to the input.
+        Example (image_size=128): ds=1→128×128, ds=2→64×64, ds=4→32×32,
+        ds=8→16×16, ds=16→8×8. Use {8} to enable at 16×16; {4,8} at 32×32和16×16。
+        上/下采样专用残差块不替换；不会为原本无条件的层新增条件嵌入。
     """
 
     def __init__(
@@ -799,6 +805,7 @@ class UNetModel(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         clf_free=True,
+        dilated_resblock_resolutions=None,
     ):
         super().__init__()
 
@@ -819,6 +826,9 @@ class UNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+        # 配置在哪些下采样倍率 ds 上将标准 ResBlock 替换为 DilatedResBlock。
+        # 例如 image_size=128 时：{8} 对应 16×16；{4,8} 对应 32×32 和 16×16。
+        self.dilated_resblock_resolutions = set(dilated_resblock_resolutions or [])
 
         
         time_embed_dim = model_channels * 4
@@ -853,17 +863,31 @@ class UNetModel(nn.Module):
         ds = 1
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
-                layers = [
-                    ResBlock(
-                        ch,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=int(mult * model_channels),
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
+                # 在选定的 ds 层级，用 DilatedResBlock 替换标准 ResBlock（非上/下采样残差块）。
+                if ds in self.dilated_resblock_resolutions:
+                    layers = [
+                        DilatedResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(mult * model_channels),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
+                else:
+                    layers = [
+                        ResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(mult * model_channels),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
                 ch = int(mult * model_channels)
                 if ds in attention_resolutions:
                     layers.append(
@@ -933,17 +957,31 @@ class UNetModel(nn.Module):
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
-                layers = [
-                    ResBlock(
-                        ch + ich,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=int(model_channels * mult),
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
+                # 在选定的 ds 层级，用 DilatedResBlock 替换标准 ResBlock（非上/下采样残差块）。
+                if ds in self.dilated_resblock_resolutions:
+                    layers = [
+                        DilatedResBlock(
+                            ch + ich,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(model_channels * mult),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
+                else:
+                    layers = [
+                        ResBlock(
+                            ch + ich,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(model_channels * mult),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
                 ch = int(model_channels * mult)
                 if ds in attention_resolutions:
                     layers.append(
