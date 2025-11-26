@@ -827,9 +827,9 @@ class ASSSFSkipFusion(nn.Module):
         include_class_cond: bool = False,          # 是否使用类别条件（关闭以提升稳定性）
         gate_hidden_dim: int = 128,                # 门控 MLP 隐藏维度
         dims: int = 2,                             # 特征维度，当前实现仅支持 2D
-        use_freq: bool = True,                     # 是否进行低/高频分解融合
-        use_boundary: bool = True,                 # 是否启用边界加权融合
-        use_boundary_in_cond: bool = False,        # 边界标量是否加入门控条件
+        use_freq: bool = False,                    # 是否进行低/高频分解融合（关闭以保护高频直通）
+        use_boundary: bool = False,                # 是否启用边界加权融合（关闭以避免数值偏置）
+        use_boundary_in_cond: bool = True,         # 边界标量是否加入门控条件（开启以提升稳定性）
         residual_alpha: float = 0.1,               # 残差融合强度，越小越接近恒等
         gate_temperature: float = 3.0,             # 门控温度，增大则输出更平缓
         gate_limit_min: float = 0.0,               # 门控下限（允许完全关闭）
@@ -856,6 +856,7 @@ class ASSSFSkipFusion(nn.Module):
         self.gate_limit_max = gate_limit_max
 
         self.ctx_proj = linear(current_channels, time_embed_dim)  # 上下文通道投影到 time_embed_dim，匹配尺度
+        self.skip_norm = normalization(skip_channels)  # 对跳跃特征做归一化，稳定后续FiLM/Gate
         cond_dim = time_embed_dim + (time_embed_dim if include_class_cond else 0) + time_embed_dim + (1 if use_boundary_in_cond else 0)
         self.cond_norm = nn.LayerNorm(cond_dim)  # 条件拼接后做层归一化，稳定门控输出
         self.gate_mlp = nn.Sequential(
@@ -919,6 +920,7 @@ class ASSSFSkipFusion(nn.Module):
         # 统一 dtype，避免混合精度问题
         dtype = current_features.dtype
         skip = skip_features.type(dtype)
+        skip = self.skip_norm(skip)
         cur = current_features.type(dtype)
 
         b, c_skip, h, w = skip.shape
@@ -928,8 +930,8 @@ class ASSSFSkipFusion(nn.Module):
         ctx = F.adaptive_avg_pool2d(cur, 1).flatten(1)
         ctx = self.ctx_proj(ctx)
 
-        # 边界描述符：仅在启用 use_boundary_in_cond 时参与门控条件
-        if self.use_boundary and self.use_boundary_in_cond:
+        # 边界描述符：即使关闭边界加权，也允许参与门控条件
+        if self.use_boundary_in_cond:
             local_mean = self.lowpass_conv(skip)
             boundary_map = (skip - local_mean).abs().mean(dim=1, keepdim=True)  # [B,1,H,W]
             b_desc = F.adaptive_avg_pool2d(boundary_map, 1).view(b, 1)  # [B,1]
@@ -989,7 +991,7 @@ class ASSSFSkipFusion(nn.Module):
 
         # 弱化门控，改为残差式融合，保证近似恒等
         out = skip + self.residual_alpha * gate_broadcast * (fused - skip)
-
+        
         return out.type(dtype)
 
 class AttentionBlock(nn.Module):
@@ -1359,7 +1361,7 @@ class UNetModel(nn.Module):
         self.as_ssf_blocks = nn.ModuleDict()
         if self.use_as_ssf:
             if as_ssf_levels is None:
-                as_ssf_levels = [2]
+                as_ssf_levels = [2, 3]
 
             output_block_idx = 0
             ch_tracker = int(channel_mult[-1] * model_channels)  # 与 middle_block 输出一致的初始通道数
@@ -1376,8 +1378,8 @@ class UNetModel(nn.Module):
                             include_class_cond=False,
                             gate_hidden_dim=as_ssf_gate_dim,
                             dims=dims,
-                            use_freq=True,
-                            use_boundary=True,
+                            use_freq=False,
+                            use_boundary=False,
                             use_boundary_in_cond=True,
                             residual_alpha=0.1,
                             gate_temperature=3.0,
@@ -1493,6 +1495,14 @@ class UNetModel(nn.Module):
                 output_block_idx += 1
         
         h = h.type(x.dtype)
+        if self.use_as_ssf:
+            ddp_safe = None
+            for blk in self.as_ssf_blocks.values():
+                for p in blk.parameters():
+                    if p.requires_grad:
+                        ddp_safe = (p.sum() * 0.0) if ddp_safe is None else ddp_safe + p.sum() * 0.0
+            if ddp_safe is not None:
+                h = h + ddp_safe.type(h.dtype)
         return self.out(h)
 
 
