@@ -266,6 +266,112 @@ class SEBlock(nn.Module):
         return x * y.expand_as(x)
 
 
+class GSConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        c_ = out_channels // 2
+        self.pw = nn.Conv2d(in_channels, c_, 1, stride=stride, padding=0, bias=False)
+        self.dw = nn.Conv2d(c_, c_, 5, stride=1, padding=2, groups=c_, bias=False)
+
+    def forward(self, x):
+        x1 = self.pw(x)
+        x2 = self.dw(x1)
+        y = th.cat([x1, x2], dim=1)
+        b, c, h, w = y.shape
+        y = y.view(b, 2, c // 2, h, w).permute(0, 2, 1, 3, 4).reshape(b, c, h, w)
+        return y
+
+
+class LightResBlock(TimestepBlock):
+    def __init__(
+        self,
+        channels,
+        emb_channels,
+        dropout,
+        out_channels=None,
+        use_conv=False,
+        use_scale_shift_norm=False,
+        dims=2,
+        use_checkpoint=False,
+        up=False,
+        down=False,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.emb_channels = emb_channels
+        self.dropout = dropout
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.use_checkpoint = use_checkpoint
+        self.use_scale_shift_norm = use_scale_shift_norm
+
+        if dims == 2:
+            conv_in = GSConv2d(channels, self.out_channels, stride=1)
+        else:
+            conv_in = conv_nd(dims, channels, self.out_channels, 3, padding=1)
+
+        self.in_layers = nn.Sequential(
+            normalization(channels, swish=1.0),
+            nn.Identity(),
+            conv_in,
+        )
+
+        self.updown = up or down
+
+        if up:
+            self.h_upd = Upsample(channels, False, dims)
+            self.x_upd = Upsample(channels, False, dims)
+        elif down:
+            self.h_upd = Downsample(channels, False, dims)
+            self.x_upd = Downsample(channels, False, dims)
+        else:
+            self.h_upd = self.x_upd = nn.Identity()
+
+        self.emb_layers = nn.Sequential(
+            nn.SiLU(),
+            linear(
+                emb_channels,
+                2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+            ),
+        )
+
+        self.out_layers = nn.Sequential(
+            normalization(self.out_channels, swish=0.0 if use_scale_shift_norm else 1.0),
+            nn.SiLU() if use_scale_shift_norm else nn.Identity(),
+            nn.Dropout(p=dropout),
+            zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)),
+        )
+
+        if self.out_channels == channels:
+            self.skip_connection = nn.Identity()
+        elif use_conv:
+            self.skip_connection = conv_nd(dims, channels, self.out_channels, 3, padding=1)
+        else:
+            self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
+
+    def forward(self, x, emb):
+        if self.updown:
+            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+            h = in_rest(x)
+            h = self.h_upd(h)
+            x = self.x_upd(x)
+            h = in_conv(h)
+        else:
+            h = self.in_layers(x)
+        emb_out = self.emb_layers(emb).type(h.dtype)
+        while len(emb_out.shape) < len(h.shape):
+            emb_out = emb_out[..., None]
+        if self.use_scale_shift_norm:
+            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+            scale, shift = th.chunk(emb_out, 2, dim=1)
+            h = out_norm(h) * (1 + scale) + shift
+            h = out_rest(h)
+        else:
+            h = h + emb_out
+            h = self.out_layers(h)
+        return self.skip_connection(x) + h
+
+
 class DirectionalSEBlock(nn.Module):
     """
     Directional Squeeze-and-Excitation block for enhanced directional feature attention.
@@ -878,7 +984,7 @@ class UNetModel(nn.Module):
                     ]
                 else:
                     layers = [
-                        ResBlock(
+                        LightResBlock(
                             ch,
                             time_embed_dim,
                             dropout,
@@ -972,7 +1078,7 @@ class UNetModel(nn.Module):
                     ]
                 else:
                     layers = [
-                        ResBlock(
+                        LightResBlock(
                             ch + ich,
                             time_embed_dim,
                             dropout,
