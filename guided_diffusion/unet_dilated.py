@@ -857,7 +857,7 @@ class ASSSFSkipFusion(nn.Module):
 
         self.ctx_proj = linear(current_channels, time_embed_dim)  # 上下文通道投影到 time_embed_dim，匹配尺度
         self.skip_norm = normalization(skip_channels)  # 对跳跃特征做归一化，稳定后续FiLM/Gate
-        cond_dim = time_embed_dim + (time_embed_dim if include_class_cond else 0) + time_embed_dim + (1 if use_boundary_in_cond else 0)
+        cond_dim = (time_embed_dim if include_class_cond else 0) + time_embed_dim + (1 if use_boundary_in_cond else 0)
         self.cond_norm = nn.LayerNorm(cond_dim)  # 条件拼接后做层归一化，稳定门控输出
         self.gate_mlp = nn.Sequential(
             linear(cond_dim, gate_hidden_dim),
@@ -916,7 +916,7 @@ class ASSSFSkipFusion(nn.Module):
         self.boundary_scale = nn.Parameter(th.tensor(0.5))
         self.boundary_weight_scale = boundary_weight_scale
 
-    def forward(self, skip_features: th.Tensor, current_features: th.Tensor, t_emb: th.Tensor, c_emb: th.Tensor = None):
+    def forward(self, skip_features: th.Tensor, current_features: th.Tensor, c_emb: th.Tensor = None):
         # 统一 dtype，避免混合精度问题
         dtype = current_features.dtype
         skip = skip_features.type(dtype)
@@ -942,14 +942,14 @@ class ASSSFSkipFusion(nn.Module):
         if self.include_class_cond:
             assert c_emb is not None, "启用了类别条件，但未提供 c_emb"
             if b_desc is not None:
-                cond = th.cat([t_emb, c_emb, ctx, b_desc], dim=-1)
+                cond = th.cat([c_emb, ctx, b_desc], dim=-1)
             else:
-                cond = th.cat([t_emb, c_emb, ctx], dim=-1)
+                cond = th.cat([c_emb, ctx], dim=-1)
         else:
             if b_desc is not None:
-                cond = th.cat([t_emb, ctx, b_desc], dim=-1)
+                cond = th.cat([ctx, b_desc], dim=-1)
             else:
-                cond = th.cat([t_emb, ctx], dim=-1)
+                cond = ctx
         cond = self.cond_norm(cond)  # 归一化不同来源条件的尺度
 
         # 产生 gate/gamma/beta/w_high（通道维度）
@@ -1482,7 +1482,7 @@ class UNetModel(nn.Module):
                 fusion_key = f"level_{level}_block_{i}"
                 # 优先使用 AS-SSF；如未启用或缺少该层，则回退到原始或金字塔融合
                 if self.use_as_ssf and fusion_key in self.as_ssf_blocks:
-                    enhanced_skip = self.as_ssf_blocks[fusion_key](skip_features, h, emb, None)
+                    enhanced_skip = self.as_ssf_blocks[fusion_key](skip_features, h)
                     h = th.cat([h, enhanced_skip], dim=1)
                 elif self.use_pyramid_fusion and fusion_key in self.pyramid_fusion_blocks:
                     enhanced_skip = self.pyramid_fusion_blocks[fusion_key](skip_features, h)
