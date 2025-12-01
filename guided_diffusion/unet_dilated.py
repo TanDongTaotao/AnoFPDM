@@ -335,11 +335,16 @@ class LightResBlock(TimestepBlock):
             ),
         )
 
+        if dims == 2:
+            out_conv = zero_module(GSConv2d(self.out_channels, self.out_channels, stride=1))
+        else:
+            out_conv = zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1))
+
         self.out_layers = nn.Sequential(
             normalization(self.out_channels, swish=0.0 if use_scale_shift_norm else 1.0),
             nn.SiLU() if use_scale_shift_norm else nn.Identity(),
             nn.Dropout(p=dropout),
-            zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)),
+            out_conv,
         )
 
         if self.out_channels == channels:
