@@ -862,7 +862,8 @@ class ASSSFSkipFusion(nn.Module):
         self.gate_mlp = nn.Sequential(
             linear(cond_dim, gate_hidden_dim),
             nn.SiLU(),
-            linear(gate_hidden_dim, skip_channels * 4),  # gate, gamma, beta, w_high
+            nn.Dropout(p=0.05),
+            linear(gate_hidden_dim, skip_channels * 4),
         )
         with th.no_grad():
             mlp_out = self.gate_mlp[-1]
@@ -919,11 +920,11 @@ class ASSSFSkipFusion(nn.Module):
     def forward(self, skip_features: th.Tensor, current_features: th.Tensor, c_emb: th.Tensor = None):
         # 统一 dtype，避免混合精度问题
         dtype = current_features.dtype
-        skip = skip_features.type(dtype)
-        skip = self.skip_norm(skip)
+        raw_skip = skip_features.type(dtype)
+        skip_normed = self.skip_norm(raw_skip)
         cur = current_features.type(dtype)
 
-        b, c_skip, h, w = skip.shape
+        b, c_skip, h, w = raw_skip.shape
 
         # 当前层全局上下文（GAP）
         # 使用实际通道数进行展平，确保兼容不同层的上下文通道
@@ -932,8 +933,8 @@ class ASSSFSkipFusion(nn.Module):
 
         # 边界描述符：即使关闭边界加权，也允许参与门控条件
         if self.use_boundary_in_cond:
-            local_mean = self.lowpass_conv(skip)
-            boundary_map = (skip - local_mean).abs().mean(dim=1, keepdim=True)  # [B,1,H,W]
+            local_mean = self.lowpass_conv(raw_skip)
+            boundary_map = (raw_skip - local_mean).abs().mean(dim=1, keepdim=True)  # [B,1,H,W]
             b_desc = F.adaptive_avg_pool2d(boundary_map, 1).view(b, 1)  # [B,1]
         else:
             b_desc = None
@@ -969,7 +970,7 @@ class ASSSFSkipFusion(nn.Module):
         gamma_broadcast = gamma.view(b, c_skip, 1, 1)
         beta_broadcast = beta.view(b, c_skip, 1, 1)
         # 保持 FiLM 调制，但整体影响将通过残差式融合弱化
-        skip_mod = gate_broadcast * (gamma_broadcast * skip + beta_broadcast)
+        skip_mod = gate_broadcast * (gamma_broadcast * raw_skip + beta_broadcast)
 
         if self.use_freq:
             # 使用更平滑的高斯低通
@@ -990,7 +991,7 @@ class ASSSFSkipFusion(nn.Module):
             fused = skip_mod
 
         # 弱化门控，改为残差式融合，保证近似恒等
-        out = skip + self.residual_alpha * gate_broadcast * (fused - skip)
+        out = raw_skip + self.residual_alpha * gate_broadcast * (fused - raw_skip)
         
         return out.type(dtype)
 
@@ -1128,9 +1129,9 @@ class UNetModel(nn.Module):
         clf_free=True,
         use_pyramid_fusion=False,  # 默认关闭金字塔融合
         pyramid_fusion_levels=None,  # 指定在哪些层级启用金字塔融合
-        use_as_ssf=True,            # 新增：启用 AS-SSF 跳跃选择性融合
-        as_ssf_levels=None,         # 新增：AS-SSF 应用层级，默认 level=2 (32×32)
-        as_ssf_gate_dim=128,        # 新增：AS-SSF 门控隐藏维度
+        use_as_ssf=True,
+        as_ssf_levels=None,
+        as_ssf_gate_dim=64,
     ):
         super().__init__()
 
@@ -1361,7 +1362,7 @@ class UNetModel(nn.Module):
         self.as_ssf_blocks = nn.ModuleDict()
         if self.use_as_ssf:
             if as_ssf_levels is None:
-                as_ssf_levels = [2, 3]
+                as_ssf_levels = [3]
 
             output_block_idx = 0
             ch_tracker = int(channel_mult[-1] * model_channels)  # 与 middle_block 输出一致的初始通道数
