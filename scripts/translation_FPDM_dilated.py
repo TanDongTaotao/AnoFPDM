@@ -7,6 +7,7 @@ import pathlib
 import numpy as np
 import torch.distributed as dist
 import torch
+import torch.nn as nn
 
 from common import read_model_and_diffusion, set_seed_for_reproducibility
 from guided_diffusion import dist_util, logger
@@ -63,6 +64,75 @@ def main():
         bucket_cap_mb=128,
         find_unused_parameters=False,
     )
+
+    try:
+        do_flops = True
+        if dist.is_available() and dist.is_initialized():
+            if dist.get_rank() != 0:
+                do_flops = False
+        if do_flops:
+            def _register_hooks(m, flops):
+                hs = []
+                def conv2d_hook(module, inputs, output):
+                    x = inputs[0]
+                    b, c_in, h_in, w_in = x.shape
+                    b2, c_out, h_out, w_out = output.shape
+                    kh, kw = module.kernel_size
+                    g = module.groups
+                    flops[0] += b * h_out * w_out * c_out * (c_in // g) * kh * kw
+                def conv3d_hook(module, inputs, output):
+                    x = inputs[0]
+                    b, c_in, d_in, h_in, w_in = x.shape
+                    b2, c_out, d_out, h_out, w_out = output.shape
+                    kd, kh, kw = module.kernel_size
+                    g = module.groups
+                    flops[0] += b * d_out * h_out * w_out * c_out * (c_in // g) * kd * kh * kw
+                def linear_hook(module, inputs, output):
+                    x = inputs[0]
+                    b = x.shape[0]
+                    in_f = x.shape[-1]
+                    out_f = output.shape[-1]
+                    flops[0] += b * in_f * out_f
+                for mod in m.modules():
+                    if isinstance(mod, nn.Conv2d):
+                        hs.append(mod.register_forward_hook(conv2d_hook))
+                    elif isinstance(mod, nn.Conv3d):
+                        hs.append(mod.register_forward_hook(conv3d_hook))
+                    elif isinstance(mod, nn.Linear):
+                        hs.append(mod.register_forward_hook(linear_hook))
+                return hs
+            def _humanize(n):
+                u = ["FLOPs","KFLOPs","MFLOPs","GFLOPs","TFLOPs"]
+                i = 0
+                x = float(n)
+                while x >= 1000 and i < len(u) - 1:
+                    x /= 1000.0
+                    i += 1
+                return f"{x:.2f} {u[i]}"
+            mm = model.module
+            mm.eval()
+            b = 1
+            c = args.in_channels
+            if isinstance(args.image_size, int):
+                h = w = args.image_size
+            else:
+                h, w = args.image_size
+            p_dtype = next(mm.parameters()).dtype
+            dummy_x = torch.randn(b, c, h, w, device=dist_util.dev(), dtype=p_dtype)
+            dummy_t = torch.tensor([0], device=dist_util.dev())
+            y = None
+            flops = [0]
+            hooks = _register_hooks(mm, flops)
+            with torch.no_grad():
+                _ = mm(dummy_x, dummy_t, y=None, threshold=-1, null=True, clf_free=True)
+            for h_ in hooks:
+                h_.remove()
+            logger.log(f"模型FLOPs(每张图): {_humanize(flops[0])}")
+            dev = next(mm.parameters()).device
+            if dev.type == "cuda":
+                torch.cuda.empty_cache()
+    except Exception as e:
+        logger.log(f"FLOPs计算失败: {e}")
 
     logger.log(f"Validation: starting to get threshold and abe range ...")
 
