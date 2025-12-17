@@ -1376,7 +1376,7 @@ class UNetModel(nn.Module):
                             skip_channels=skip_ch,
                             current_channels=current_ch,
                             time_embed_dim=time_embed_dim,
-                            include_class_cond=False,
+                            include_class_cond=(self.num_classes is not None),
                             gate_hidden_dim=as_ssf_gate_dim,
                             dims=dims,
                             use_freq=False,
@@ -1432,6 +1432,7 @@ class UNetModel(nn.Module):
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
         cemb_mm = None
+        cond_cemb = None
         
         #-------------------------------- Condition Setup --------------------------
         '''
@@ -1465,6 +1466,7 @@ class UNetModel(nn.Module):
             assert cemb is not None
             assert cemb_mm is not None
             emb = emb + cemb 
+            cond_cemb = cemb
         #-------------------------------- Condition Setup --------------------------
             
 
@@ -1483,7 +1485,7 @@ class UNetModel(nn.Module):
                 fusion_key = f"level_{level}_block_{i}"
                 # 优先使用 AS-SSF；如未启用或缺少该层，则回退到原始或金字塔融合
                 if self.use_as_ssf and fusion_key in self.as_ssf_blocks:
-                    enhanced_skip = self.as_ssf_blocks[fusion_key](skip_features, h)
+                    enhanced_skip = self.as_ssf_blocks[fusion_key](skip_features, h, cond_cemb)
                     h = th.cat([h, enhanced_skip], dim=1)
                 elif self.use_pyramid_fusion and fusion_key in self.pyramid_fusion_blocks:
                     enhanced_skip = self.pyramid_fusion_blocks[fusion_key](skip_features, h)
