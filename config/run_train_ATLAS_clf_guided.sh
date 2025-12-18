@@ -15,11 +15,6 @@
 #SBATCH -o ./slurm_out/slurm.%j.out
 
 
-module purge
-module load mamba/latest
-source activate torch_base
-
-
 in_channels=1
 batch_size=64
 save_interval=5000
@@ -28,12 +23,17 @@ image_size=128
 version=v1 # unet version
 
 # log directory
-export OPENAI_LOGDIR="./logs/logs_atlas_normal_99_11_128/logs_clf_guided_v1"
+DATA_ROOT="./data"
+LOG_ROOT="./logs"
+
+export OPENAI_LOGDIR="${LOG_ROOT}/logs_atlas_normal_99_11_128/logs_clf_guided_v1"
+mkdir -p "$OPENAI_LOGDIR"
 
 # data directory
-data_dir="/data/amciilab/yiming/DATA/ATLAS/preprocessed_data_t1_00_128"
+data_dir="${DATA_ROOT}/ATLAS_2/preprocessed_data_t1_00_128"
 # saved images directory, visual check
 image_dir="$OPENAI_LOGDIR/images"
+mkdir -p "$image_dir"
 
 DATA_FLAGS="--image_size $image_size --num_classes $num_classes --class_cond True --ret_lab True --mixed True"
 
@@ -53,16 +53,12 @@ TRAIN_FLAGS="--data_dir $data_dir --image_dir $image_dir --batch_size $batch_siz
 
 EVA_FLAGS="--save_interval $save_interval --sample_shape 12 $in_channels $image_size $image_size" 
 
+GUI_FLAGS=""
 
-# slurm setup
-master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_ADDR=$master_addr
-echo $MASTER_ADDR
+export MASTER_ADDR=localhost
+export MASTER_PORT=12366
 
-export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
-echo $MASTER_PORT
-
-NUM_GPUS=2
+NUM_GPUS=1
 torchrun --nproc-per-node $NUM_GPUS \
          --nnodes=1\
          --rdzv-backend=c10d\

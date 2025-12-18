@@ -15,29 +15,25 @@
 #SBATCH -o ./slurm_out/slurm.%j.out
 
 
-module purge
-module load mamba/latest
-source activate torch_base
-
 num_classes=2
 image_size=128
 version=v1
 in_channels=1
 
 
-master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_ADDR=$master_addr
-echo $MASTER_ADDR
+DATA_ROOT="./data"
+LOG_ROOT="./logs"
 
-export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
-echo $MASTER_PORT
+export MASTER_ADDR=localhost
+export MASTER_PORT=12365
 
-export OPENAI_LOGDIR="./logs/logs_atlas_clf"
-echo $OPENAI_LOGDIR
+export OPENAI_LOGDIR="${LOG_ROOT}/logs_atlas_clf"
+mkdir -p "$OPENAI_LOGDIR"
 
 image_dir="$OPENAI_LOGDIR/images"
+mkdir -p "$image_dir"
 
-data_dir="/data/amciilab/yiming/DATA/ATLAS/preprocessed_data_t1_00_128"
+data_dir="${DATA_ROOT}/ATLAS_2/preprocessed_data_t1_00_128"
 
 
 CLASSIFIER_FLAGS="--unet_ver $version --image_size $image_size --classifier_attention_resolutions 32,16,8 \

@@ -1,31 +1,16 @@
 #!/bin/bash
 
-#SBATCH --job-name='train'
-#SBATCH --nodes=1                    
-#SBATCH --ntasks-per-node=2
-#SBATCH --cpus-per-task=2
-#SBATCH --gres=gpu:a100:2
-#SBATCH --mem=16G
-#SBATCH -p general                
-#SBATCH -q grp_twu02 
-            
-#SBATCH -t 2-00:00:00               
-            
-#SBATCH -e ./slurm_out/slurm.%j.err
-#SBATCH -o ./slurm_out/slurm.%j.out
-
-ddpm_sampling=False # ddim or ddpm
+ddpm_sampling=False
 
 in_channels=1
 batch_size=64
 save_interval=5000
 
-num_classes=2 
+num_classes=2
 image_size=128
 threshold=0.1
-version=v2
+version=dilated
 
-# log dir
 DATA_ROOT="./data"
 LOG_ROOT="./logs"
 
@@ -36,7 +21,7 @@ data_dir="${DATA_ROOT}/ATLAS_2/preprocessed_data_t1_00_128"
 image_dir="$OPENAI_LOGDIR/images"
 mkdir -p "$image_dir"
 
-GUI_FLAGS="--w 1 1.8 2 3 --threshold $threshold" # select w for visual check only
+GUI_FLAGS="--w 1 1.8 2 3 --threshold $threshold"
 
 DATA_FLAGS="--image_size $image_size --num_classes $num_classes --class_cond True --ret_lab True --mixed True"
 
@@ -59,14 +44,12 @@ TRAIN_FLAGS="--data_dir $data_dir --image_dir $image_dir --batch_size $batch_siz
 EVA_FLAGS="--save_interval $save_interval --sample_shape 12 $in_channels $image_size $image_size"
 
 export MASTER_ADDR=localhost
-export MASTER_PORT=12367
+export MASTER_PORT=12368
 
 NUM_GPUS=1
 torchrun --nproc-per-node $NUM_GPUS \
          --nnodes=1\
          --rdzv-backend=c10d\
          --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT\
-        ./scripts/train.py --name atlas $DATA_FLAGS $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS $GUI_FLAGS $EVA_FLAGS 
-
-
+        ./scripts/train_dilated.py --name atlas $DATA_FLAGS $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS $GUI_FLAGS $EVA_FLAGS
 

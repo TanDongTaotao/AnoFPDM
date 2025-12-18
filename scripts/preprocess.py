@@ -9,6 +9,7 @@ import nibabel as nib
 from tqdm import tqdm
 import nrrd
 import torch.nn.functional as F
+from typing import Any, Dict, List, Optional
 
 
 def normalise_percentile(volume):
@@ -31,6 +32,74 @@ def center_crop(volume, target_shape):
     return cropped_volume
     
 
+def _atlas_patient_id_from_mask(mask_path: Path) -> str:
+    parts = mask_path.name.split("_")
+    sub = next((p for p in parts if p.startswith("sub-")), None)
+    ses = next((p for p in parts if p.startswith("ses-")), None)
+    if sub and ses:
+        return f"{sub}_{ses}"
+    if sub:
+        return sub
+    if mask_path.name.endswith(".nii.gz"):
+        return mask_path.name[:-7]
+    return mask_path.stem
+
+
+def _find_atlas_t1_for_mask(mask_path: Path) -> Optional[Path]:
+    mask_name = mask_path.name
+    if mask_name.endswith(".nii.gz"):
+        base = mask_name[:-7]
+    else:
+        base = mask_path.stem
+
+    parent = mask_path.parent
+    candidates: List[Path] = []
+
+    if "_label-L_desc-T1lesion_mask" in base:
+        candidates.append(parent / (base.replace("_label-L_desc-T1lesion_mask", "_desc-T1w") + ".nii.gz"))
+        candidates.append(parent / (base.replace("_label-L_desc-T1lesion_mask", "_T1w") + ".nii.gz"))
+        candidates.append(parent / (base.replace("_label-L_desc-T1lesion_mask", "_desc-T1w_image") + ".nii.gz"))
+
+    for c in candidates:
+        if c.exists():
+            return c
+
+    t1_candidates = sorted(
+        p
+        for p in parent.glob("*.nii.gz")
+        if ("T1w" in p.name or "t1w" in p.name) and ("mask" not in p.name.lower())
+    )
+    if len(t1_candidates) == 1:
+        return t1_candidates[0]
+    if len(t1_candidates) > 1:
+        exact = [p for p in t1_candidates if "_desc-T1w" in p.name]
+        if len(exact) == 1:
+            return exact[0]
+        return t1_candidates[0]
+
+    return None
+
+
+def _find_atlas_cases(datapath: Path) -> List[Dict[str, Any]]:
+    mask_paths = sorted(datapath.rglob("*T1lesion_mask.nii.gz"))
+    cases: List[Dict[str, Any]] = []
+    seen_ids: Dict[str, int] = {}
+    for mask_path in mask_paths:
+        t1_path = _find_atlas_t1_for_mask(mask_path)
+        if t1_path is None:
+            raise FileNotFoundError(f"Cannot find T1w image for mask: {mask_path}")
+        patient_id = _atlas_patient_id_from_mask(mask_path)
+        if patient_id in seen_ids:
+            seen_ids[patient_id] += 1
+            patient_id = f"{patient_id}_{seen_ids[patient_id]}"
+        else:
+            seen_ids[patient_id] = 0
+        cases.append({"id": patient_id, "t1": t1_path, "mask": mask_path})
+    if len(cases) == 0:
+        raise FileNotFoundError(f"No ATLAS lesion masks found under: {datapath}")
+    return cases
+
+
 def process_patient(name, path, target_path, mod, first=-1, last=-1, downsample=False):
     
     if name == 'brats':
@@ -40,8 +109,14 @@ def process_patient(name, path, target_path, mod, first=-1, last=-1, downsample=
         t2 = nib.load(path / f"{path.name}_t2.nii.gz").get_fdata()
         labels = nib.load(path / f"{path.name}_seg.nii.gz").get_fdata()
     elif name == "atlas":
-        t1 = nib.load(path / f"{path.name}_T1w.nii.gz").get_fdata()
-        labels = nib.load(path / f"{path.name}_mask.nii.gz").get_fdata()
+        if isinstance(path, dict):
+            patient_name = str(path["id"])
+            t1 = nib.load(Path(path["t1"])).get_fdata()
+            labels = nib.load(Path(path["mask"])).get_fdata()
+        else:
+            patient_name = path.name
+            t1 = nib.load(path / f"{path.name}_T1w.nii.gz").get_fdata()
+            labels = nib.load(path / f"{path.name}_mask.nii.gz").get_fdata()
     elif name == 'mmbrain':
         seed = random.randint(1, 5)
         flair = center_crop(nrrd.read(path / f"TrialSeed{seed}_FLAIR.nrrd")[0], 240).astype(np.float64)
@@ -88,7 +163,10 @@ def process_patient(name, path, target_path, mod, first=-1, last=-1, downsample=
     elif name == 'mmbrain':
         labels = torch.where(torch.from_numpy(labels)==5, 1, 0).float().unsqueeze(dim=0).unsqueeze(dim=0)
 
-    patient_dir = target_path / f"patient_{path.name}"
+    if name == "atlas":
+        patient_dir = target_path / f"patient_{patient_name}"
+    else:
+        patient_dir = target_path / f"patient_{path.name}"
     patient_dir.mkdir(parents=True, exist_ok=True)
 
     volume = normalise_percentile(volume)
@@ -97,7 +175,10 @@ def process_patient(name, path, target_path, mod, first=-1, last=-1, downsample=
     fs_dim2 = sum_dim2.argmax()
     ls_dim2 = volume[0].mean(dim=0).shape[2] - sum_dim2.flip(dims=[0]).argmax()
 
-    print(f"Patient {path.name} has {fs_dim2} to {ls_dim2} slices with brain tissue.", flush=True)
+    if name == "atlas":
+        print(f"Patient {patient_name} has {fs_dim2} to {ls_dim2} slices with brain tissue.", flush=True)
+    else:
+        print(f"Patient {path.name} has {fs_dim2} to {ls_dim2} slices with brain tissue.", flush=True)
     
     for slice_idx in range(fs_dim2, ls_dim2):
         if downsample:
@@ -115,7 +196,13 @@ def process_patient(name, path, target_path, mod, first=-1, last=-1, downsample=
 
 def preprocess(name: str, datapath: Path, mod: str, first=-1, last=-1, shape=128, downsample=True):
 
-    all_imgs = sorted(list((datapath).iterdir()))
+    case_by_id: Optional[Dict[str, Dict[str, Any]]] = None
+    if name == "atlas":
+        atlas_cases = _find_atlas_cases(datapath)
+        all_imgs = atlas_cases
+        case_by_id = {c["id"]: c for c in atlas_cases}
+    else:
+        all_imgs = sorted(list((datapath).iterdir()))
 
     sub_dir = f"preprocessed_data_{mod}_{first}{last}_{shape}"
     splits_path = datapath.parent / sub_dir / "data_splits"
@@ -151,10 +238,19 @@ def preprocess(name: str, datapath: Path, mod: str, first=-1, last=-1, shape=128
         for split in ["train", "val", "test"]:
             (splits_path / split).mkdir(parents=True, exist_ok=True)
             with open(splits_path / split / "scans.csv", "w") as f:
-                f.write("\n".join([all_imgs[idx].name for idx in split_indices[split]]))
+                if name == "atlas":
+                    f.write("\n".join([str(all_imgs[idx]["id"]) for idx in split_indices[split]]))
+                else:
+                    f.write("\n".join([all_imgs[idx].name for idx in split_indices[split]]))
 
     for split in ["train", "val", "test"]:
-        paths = [datapath / x.strip() for x in open(splits_path / split / "scans.csv").readlines()]
+        scan_ids = [x.strip() for x in open(splits_path / split / "scans.csv").readlines()]
+        if name == "atlas":
+            if case_by_id is None:
+                case_by_id = {c["id"]: c for c in _find_atlas_cases(datapath)}
+            paths = [case_by_id[scan_id] for scan_id in scan_ids]
+        else:
+            paths = [datapath / scan_id for scan_id in scan_ids]
 
         print(f"Patients in {split}]: {len(paths)}")
 

@@ -15,11 +15,6 @@
 #SBATCH -o ./slurm_out/slurm.%j.out
 
 
-module purge
-module load mamba/latest
-source activate torch_base
-
-
 noise_type=simplex
 # noise_type=gaussian
 
@@ -31,12 +26,15 @@ num_classes=0 # unguided
 image_size=128
 
 # log directory
-export OPENAI_LOGDIR="./logs/logs_atlas_normal_99_11_128/logs_anoddpm_${noise_type}"
-# data directory
-data_dir="/data/amciilab/yiming/DATA/ATLAS/preprocessed_data_t1_00_128"
+DATA_ROOT="./data"
+LOG_ROOT="./logs"
+
+export OPENAI_LOGDIR="${LOG_ROOT}/logs_atlas_normal_99_11_128/logs_anoddpm_${noise_type}"
+mkdir -p "$OPENAI_LOGDIR"
+
+data_dir="${DATA_ROOT}/ATLAS_2/preprocessed_data_t1_00_128"
 image_dir="$OPENAI_LOGDIR/images"
-# resume from checkpoint
-resume_checkpoint=$OPENAI_LOGDIR/model106100.pt
+mkdir -p "$image_dir"
 
 DATA_FLAGS="--image_size $image_size --num_classes $num_classes \
                 --class_cond False --ret_lab False --mixed False
@@ -47,7 +45,7 @@ MODEL_FLAGS="--unet_ver v1\
              --num_channels 128 \
              --attention_resolutions 32,16,8 \
              --learn_sigma False\
-             --dropout 0 --resume_checkpoint $resume_checkpoint"
+             --dropout 0"
 
 DIFFUSION_FLAGS="--diffusion_steps 1000\
                 --noise_type $noise_type \
@@ -62,16 +60,10 @@ TRAIN_FLAGS="--data_dir $data_dir --image_dir $image_dir \
 EVA_FLAGS="--save_interval $save_interval --sample_shape 12 $in_channels $image_size $image_size --ddpm_sampling True"
 
 
-# slurm setup
-master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_ADDR=$master_addr
-echo $MASTER_ADDR
+export MASTER_ADDR=localhost
+export MASTER_PORT=12364
 
-
-export MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
-echo $MASTER_PORT
-
-NUM_GPUS=2
+NUM_GPUS=1
 torchrun --nproc-per-node $NUM_GPUS \
          --nnodes=1\
          --rdzv-backend=c10d\
