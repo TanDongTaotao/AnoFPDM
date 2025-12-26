@@ -577,6 +577,7 @@ def get_mask_batch(source, target, threshold, mod, median_filter=True):
     mse_mask = mse >= threshold
     mse_mask = mse_mask.float()
     pred_lab = (torch.sum(mse_mask, dim=(1, 2, 3)) > 0).float().cpu()
+    print(f"MSE stats: max={mse.max().item()}, mean={mse.mean().item()}")
     return mse_mask, mse, pred_lab
 
 
