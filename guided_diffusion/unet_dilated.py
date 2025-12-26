@@ -832,7 +832,8 @@ class UNetModel(nn.Module):
 
         
         time_embed_dim = model_channels * 4
-        encoder_channels = time_embed_dim
+        # encoder_channels = time_embed_dim
+        encoder_channels = time_embed_dim if self.num_classes is not None else None
 
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
