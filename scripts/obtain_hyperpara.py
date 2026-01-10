@@ -564,6 +564,8 @@ def get_mask_batch_FPDM_dual_threshold(
 
 # %% For non-dynamical threshold to obtain pred_mask (other comparison methods)
 def get_mask_batch(source, target, threshold, mod, median_filter=True):
+    if isinstance(mod, int):
+        mod = [mod]
     mse = (
         ((source[:, mod, ...] - target[:, mod, ...])**2).mean(dim=1, keepdims=True)
     )  # nx1x128x128
@@ -596,8 +598,13 @@ def obtain_optimal_threshold(
     TARGET = []
     SOURCE = []
     MASK = []
+    data_val_iter = iter(data_val)
     for i in range(args.num_batches_val):
-        source_val, mask_val, _ = data_val.__iter__().__next__()
+        try:
+            source_val, mask_val, _ = next(data_val_iter)
+        except StopIteration:
+            data_val_iter = iter(data_val)
+            source_val, mask_val, _ = next(data_val_iter)
         source_val = source_val.to(device)
         mask_val = mask_val.to(device)
 
@@ -660,13 +667,24 @@ def obtain_optimal_threshold(
 
     dice_max = 0
     thr_opt = 0
+    if isinstance(args.modality, int):
+        mod = [args.modality]
+    else:
+        mod = args.modality
+
+    mse = (((SOURCE[:, mod, ...] - TARGET[:, mod, ...]) ** 2).mean(dim=1, keepdims=True))
+    mse = median_pool(mse, kernel_size=5, stride=1, padding=2)
+
+    mse_max = float(mse.max().detach().cpu())
+    mse_min = float(mse.min().detach().cpu())
+    if mse_max <= 0:
+        return 0.0, 0.0
+
     # range of threshold, select the best one
-    threshold_range = np.arange(0.01, 0.7, 0.01)
+    threshold_range = np.linspace(0.0, mse_max, 200, dtype=np.float64)
     for thr in threshold_range:
-        PRED_MASK, PRED_MAP, _ = get_mask_batch(
-            SOURCE, TARGET, thr, args.modality, median_filter=True
-        )
-        eval_metrics = evaluate(MASK, PRED_MASK, SOURCE, PRED_MAP)
+        pred_mask = (mse >= thr).float()
+        eval_metrics = evaluate(MASK, pred_mask, SOURCE, mse)
 
         if eval_metrics["dice"] > dice_max:
             dice_max = eval_metrics["dice"]

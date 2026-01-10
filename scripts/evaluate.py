@@ -23,6 +23,7 @@ def evaluate(
     ano_map: torch.Tensor,
     label: torch.Tensor = None, 
     cc_filter=True,
+    cc_thr=40,
 ):
     """
     real_mask: [b, 1, h, w]; recon_mask: [b, 1, h, w];
@@ -38,7 +39,7 @@ def evaluate(
         ano_map = ano_map[torch.where(label == 1)[0], ...]
 
     if cc_filter:
-        recon_mask = connected_components_3d(recon_mask, thr=40) # post-processed by connected components
+        recon_mask = connected_components_3d(recon_mask, thr=cc_thr) # post-processed by connected components
 
     dice_batch = dice_coeff(real_mask, recon_mask)
     iou_batch = IoU(real_mask, recon_mask)
@@ -76,14 +77,14 @@ def IoU(real_mask, recon_mask, smooth=0.000001):
 
 def precision(real_mask, recon_mask):
     TP = (real_mask == 1) & (recon_mask == 1)
-    FP = (real_mask == 1) & (recon_mask == 0)
+    FP = (real_mask == 0) & (recon_mask == 1)
     pr = torch.sum(TP).float() / ((torch.sum(TP) + torch.sum(FP)).float() + 1e-6)
     return pr.item()
 
 
 def recall(real_mask, recon_mask):
     TP = (real_mask == 1) & (recon_mask == 1)
-    FN = (real_mask == 0) & (recon_mask == 1)
+    FN = (real_mask == 1) & (recon_mask == 0)
     re = torch.sum(TP).float() / ((torch.sum(TP) + torch.sum(FN)).float() + 1e-6)
     return re.item()
 
