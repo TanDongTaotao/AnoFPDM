@@ -838,6 +838,7 @@ class ASSSFSkipFusion(nn.Module):
         lowpass_sigma: float = 0.8,                # 低通高斯 sigma（更温和）
         boundary_smooth_kernel_size: int = 5,      # 边界权重平滑核大小
         boundary_weight_scale: float = 0.25,       # 边界权重整体缩放（降低影响）
+        use_spatial_attn: bool = True,             # 是否启用空间上下文注意力（新特性）
     ):
         super().__init__()
         assert dims == 2, "当前实现仅支持 2D 特征"
@@ -848,12 +849,23 @@ class ASSSFSkipFusion(nn.Module):
         self.use_freq = use_freq
         self.use_boundary = use_boundary
         self.use_boundary_in_cond = use_boundary_in_cond
+        self.use_spatial_attn = use_spatial_attn
 
         # 残差融合与门控控制参数
         self.residual_alpha = residual_alpha
         self.gate_temperature = gate_temperature
         self.gate_limit_min = gate_limit_min
         self.gate_limit_max = gate_limit_max
+
+        # 空间上下文注意力模块（轻量级）
+        if self.use_spatial_attn:
+            self.spatial_attn_conv = nn.Sequential(
+                conv_nd(dims, current_channels, current_channels // 4, 1),
+                normalization(current_channels // 4),
+                nn.SiLU(),
+                conv_nd(dims, current_channels // 4, 1, 1),
+                nn.Sigmoid()
+            )
 
         self.ctx_proj = linear(current_channels, time_embed_dim)  # 上下文通道投影到 time_embed_dim，匹配尺度
         self.skip_norm = normalization(skip_channels)  # 对跳跃特征做归一化，稳定后续FiLM/Gate
@@ -967,6 +979,16 @@ class ASSSFSkipFusion(nn.Module):
 
         # FiLM + Gate 调制
         gate_broadcast = gate.view(b, c_skip, 1, 1)
+
+        # 空间上下文注意力增强 (Spatial Context Attention)
+        if self.use_spatial_attn:
+            # 生成空间注意力图 [B, 1, H_cur, W_cur]
+            sp_attn = self.spatial_attn_conv(cur)
+            # 上采样到跳跃特征分辨率 [B, 1, H, W]
+            sp_attn = F.interpolate(sp_attn, size=(h, w), mode='bilinear', align_corners=False)
+            # 联合门控：通道门控 * 空间门控
+            gate_broadcast = gate_broadcast * sp_attn
+
         gamma_broadcast = gamma.view(b, c_skip, 1, 1)
         beta_broadcast = beta.view(b, c_skip, 1, 1)
         # 保持 FiLM 调制，但整体影响将通过残差式融合弱化
