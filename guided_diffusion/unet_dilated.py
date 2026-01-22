@@ -244,6 +244,117 @@ class ResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
+class GSConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        c_ = out_channels // 2
+        self.pw = nn.Conv2d(in_channels, c_, 1, stride=stride, padding=0, bias=False)
+        self.dw = nn.Conv2d(c_, c_, 5, stride=1, padding=2, groups=c_, bias=False)
+
+    def forward(self, x):
+        x1 = self.pw(x)
+        x2 = self.dw(x1)
+        y = th.cat([x1, x2], dim=1)
+        b, c, h, w = y.shape
+        y = y.view(b, 2, c // 2, h, w).permute(0, 2, 1, 3, 4).reshape(b, c, h, w)
+        return y
+
+
+class LightResBlock(TimestepBlock):
+    def __init__(
+        self,
+        channels,
+        emb_channels,
+        dropout,
+        out_channels=None,
+        use_conv=False,
+        use_scale_shift_norm=False,
+        dims=2,
+        use_checkpoint=False,
+        up=False,
+        down=False,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.emb_channels = emb_channels
+        self.dropout = dropout
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.use_checkpoint = use_checkpoint
+        self.use_scale_shift_norm = use_scale_shift_norm
+
+        if dims == 2:
+            conv_in = GSConv2d(channels, self.out_channels, stride=1)
+        else:
+            conv_in = conv_nd(dims, channels, self.out_channels, 3, padding=1)
+
+        self.in_layers = nn.Sequential(
+            normalization(channels, swish=1.0),
+            nn.Identity(),
+            conv_in,
+        )
+
+        self.updown = up or down
+
+        if up:
+            self.h_upd = Upsample(channels, False, dims)
+            self.x_upd = Upsample(channels, False, dims)
+        elif down:
+            self.h_upd = Downsample(channels, False, dims)
+            self.x_upd = Downsample(channels, False, dims)
+        else:
+            self.h_upd = self.x_upd = nn.Identity()
+
+        self.emb_layers = nn.Sequential(
+            nn.SiLU(),
+            linear(
+                emb_channels,
+                2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+            ),
+        )
+
+        if dims == 2:
+            out_conv = zero_module(GSConv2d(self.out_channels, self.out_channels, stride=1))
+        else:
+            out_conv = zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1))
+
+        self.out_layers = nn.Sequential(
+            normalization(self.out_channels, swish=0.0 if use_scale_shift_norm else 1.0),
+            nn.SiLU() if use_scale_shift_norm else nn.Identity(),
+            nn.Dropout(p=dropout),
+            out_conv,
+        )
+
+        if self.out_channels == channels:
+            self.skip_connection = nn.Identity()
+        elif use_conv:
+            self.skip_connection = conv_nd(dims, channels, self.out_channels, 3, padding=1)
+        else:
+            self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
+
+    def forward(self, x, emb):
+        if self.updown:
+            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+            h = in_rest(x)
+            h = self.h_upd(h)
+            x = self.x_upd(x)
+            h = in_conv(h)
+        else:
+            h = self.in_layers(x)
+        emb_out = self.emb_layers(emb).type(h.dtype)
+        while len(emb_out.shape) < len(h.shape):
+            emb_out = emb_out[..., None]
+        if self.use_scale_shift_norm:
+            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+            scale, shift = th.chunk(emb_out, 2, dim=1)
+            h = out_norm(h) * (1 + scale) + shift
+            h = out_rest(h)
+        else:
+            h = h + emb_out
+            h = self.out_layers(h)
+        return self.skip_connection(x) + h
+
+
 class SEBlock(nn.Module):
 
     """
@@ -667,156 +778,13 @@ class DilatedResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
-class PyramidFusionBlock(nn.Module):
-    """
-    多尺度特征金字塔融合模块
-    
-    通过并行的多膨胀率卷积构建特征金字塔，实现多尺度信息的高效融合。
-    设计用于增强跳跃连接，提升异常检测的精度和边界定位能力。
-    
-    核心特性：
-    1. 多尺度感受野：3×3, 5×5, 9×9 三种感受野并行处理
-    2. 特征分组：减少计算量，提高效率
-    3. 残差连接：保证梯度流动和特征复用
-    4. 自适应融合：通过注意力机制智能融合不同尺度特征
-    """
-    
-    def __init__(
-        self,
-        skip_channels,      # 跳跃连接的通道数
-        current_channels,   # 当前层的通道数
-        dims=2,            # 空间维度
-        dilation_rates=(1, 3, 5),  # 膨胀率组合
-        reduction=8,       # 注意力机制的降维比例
-        use_checkpoint=False,
-        num_heads=1,
-    ):
-        super().__init__()
-
-        self.skip_channels = skip_channels
-        self.current_channels = current_channels
-        self.dims = dims
-        self.dilation_rates = dilation_rates
-        self.use_checkpoint = use_checkpoint
-        self.num_heads = num_heads
-        
-        # 计算每个分组的通道数
-        self.group_channels = skip_channels // len(dilation_rates)
-        assert skip_channels % len(dilation_rates) == 0, \
-            f"skip_channels ({skip_channels}) must be divisible by number of dilation rates ({len(dilation_rates)})"
-        
-        # 多尺度膨胀卷积分支
-        self.pyramid_convs = nn.ModuleList()
-        for dilation in dilation_rates:
-            conv_branch = nn.Sequential(
-                conv_nd(dims, self.group_channels, self.group_channels, 
-                       kernel_size=3, padding=dilation, dilation=dilation),
-                normalization(self.group_channels),
-                nn.SiLU(),
-                conv_nd(dims, self.group_channels, self.group_channels, 
-                       kernel_size=1)  # 1x1卷积用于特征精炼
-            )
-            self.pyramid_convs.append(conv_branch)
-        
-        # 特征融合层
-        fused_channels = skip_channels
-        self.fusion_conv = nn.Sequential(
-            conv_nd(dims, fused_channels, fused_channels, kernel_size=1),
-            normalization(fused_channels),
-            nn.SiLU()
-        )
-        
-        # 自适应注意力机制
-        self.attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1) if dims == 2 else nn.AdaptiveAvgPool3d(1),
-            conv_nd(dims, fused_channels, fused_channels // reduction, kernel_size=1),
-            nn.SiLU(),
-            conv_nd(dims, fused_channels // reduction, fused_channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # 输出投影层（保持跳跃连接的通道数不变）
-        self.output_proj = conv_nd(dims, fused_channels, skip_channels, kernel_size=1)
-
-        # 残差连接保持原始通道数
-        self.skip_proj = nn.Identity()
-
-        # 交叉注意力：以融合后的跳跃特征为 Query，以当前层特征为 Encoder K/V
-        # 输出维持为 skip_channels，便于与原始跳跃特征做残差并与解码特征拼接
-        self.cross_attn = AttentionBlock(
-            channels=skip_channels,
-            num_heads=self.num_heads,
-            num_head_channels=-1,
-            use_checkpoint=False,
-            encoder_channels=current_channels,
-        )
-    
-    def forward(self, skip_features, current_features):
-        """
-        前向传播
-        
-        Args:
-            skip_features: 来自编码器的跳跃连接特征 [B, skip_channels, H, W]
-            current_features: 当前解码层特征 [B, current_channels, H, W]
-            
-        Returns:
-            enhanced_features: 增强后的跳跃特征 [B, skip_channels, H, W]
-        """
-        if self.use_checkpoint:
-            return checkpoint(self._forward, skip_features, current_features)
-        else:
-            return self._forward(skip_features, current_features)
-
-    def _forward(self, skip_features, current_features):
-        # 对齐 dtype 以避免混合精度下的类型不一致
-        current_features = current_features.type(skip_features.dtype)
-        skip_features = skip_features.type(current_features.dtype)
-
-        B, C, *spatial_dims = skip_features.shape
-        
-        # 1. 特征分组
-        # 将跳跃连接特征按通道分组，每组对应一个膨胀率
-        grouped_features = th.chunk(skip_features, len(self.dilation_rates), dim=1)
-        
-        # 2. 多尺度膨胀卷积
-        pyramid_outputs = []
-        for i, (group_feat, conv_branch) in enumerate(zip(grouped_features, self.pyramid_convs)):
-            # 对每组特征应用对应的膨胀卷积
-            enhanced_feat = conv_branch(group_feat)
-            pyramid_outputs.append(enhanced_feat)
-        
-        # 3. 特征拼接
-        fused_features = th.cat(pyramid_outputs, dim=1)
-        
-        # 4. 特征融合
-        fused_features = self.fusion_conv(fused_features)
-        
-        # 5. 自适应注意力加权
-        attention_weights = self.attention(fused_features)
-        attended_features = fused_features * attention_weights
-
-        # 6. 交叉注意力（Query: 融合后的跳跃特征，KV: 当前层特征）
-        # 将当前层特征展平为序列以供 Encoder KV 使用
-        encoder_tokens = current_features.view(B, self.current_channels, -1)
-        cross_attended = self.cross_attn(attended_features, encoder_out=encoder_tokens)
-
-        # 7. 输出投影
-        output = self.output_proj(cross_attended)
-
-        # 8. 残差连接
-        residual = self.skip_proj(skip_features)
-        enhanced_features = output + residual
-
-        return enhanced_features
-
-
 class ASSSFSkipFusion(nn.Module):
     """
-    AS-SSF（Anomaly-Sensitive Skip Selective Fusion）跳跃融合模块
+    AS-SSF (Anomaly-Sensitive Skip Selective Fusion) skip-fusion module
 
-    - 使用时间步（t）嵌入和当前层上下文进行 FiLM/Gate 通道调制。
-    - 进行低/高频分解并自适应融合，突出异常相关高频与边界。
-    - 可选类别条件融合（与 t_emb 维度一致）。
+    - Uses timestep (t) embedding and current-layer context for FiLM/gated channel modulation.
+    - Optionally performs low/high-frequency decomposition and adaptive fusion to emphasize anomaly-related high-frequency and boundaries.
+    - Optional class-conditional fusion (same dimensionality as t_emb).
     """
 
     def __init__(
@@ -824,23 +792,23 @@ class ASSSFSkipFusion(nn.Module):
         skip_channels: int,
         current_channels: int,
         time_embed_dim: int,
-        include_class_cond: bool = False,          # 是否使用类别条件（关闭以提升稳定性）
-        gate_hidden_dim: int = 128,                # 门控 MLP 隐藏维度
-        dims: int = 2,                             # 特征维度，当前实现仅支持 2D
-        use_freq: bool = False,                    # 是否进行低/高频分解融合（关闭以保护高频直通）
-        use_boundary: bool = False,                # 是否启用边界加权融合（关闭以避免数值偏置）
-        use_boundary_in_cond: bool = True,         # 边界标量是否加入门控条件（开启以提升稳定性）
-        residual_alpha: float = 0.1,               # 残差融合强度，越小越接近恒等
-        gate_temperature: float = 3.0,             # 门控温度，增大则输出更平缓
-        gate_limit_min: float = 0.0,               # 门控下限（允许完全关闭）
-        gate_limit_max: float = 1.0,               # 门控上限（允许完全打开）
-        lowpass_kernel_size: int = 3,              # 低通核大小（更温和）
-        lowpass_sigma: float = 0.8,                # 低通高斯 sigma（更温和）
-        boundary_smooth_kernel_size: int = 5,      # 边界权重平滑核大小
-        boundary_weight_scale: float = 0.25,       # 边界权重整体缩放（降低影响）
+        include_class_cond: bool = False,          # Whether to use class conditioning (disabled for stability).
+        gate_hidden_dim: int = 128,                # Hidden dim for the gating MLP.
+        dims: int = 2,                             # Feature dimensionality (this implementation supports 2D only).
+        use_freq: bool = False,                    # Whether to use low/high-frequency fusion (disabled to preserve high-frequency passthrough).
+        use_boundary: bool = False,                # Whether to enable boundary-weighted fusion (disabled to avoid numerical bias).
+        use_boundary_in_cond: bool = True,         # Whether to include boundary scalar in gating condition (enabled for stability).
+        residual_alpha: float = 0.1,               # Residual fusion strength; smaller keeps closer to identity.
+        gate_temperature: float = 3.0,             # Gate temperature; larger produces smoother outputs.
+        gate_limit_min: float = 0.0,               # Gate lower bound (allows fully closed).
+        gate_limit_max: float = 1.0,               # Gate upper bound (allows fully open).
+        lowpass_kernel_size: int = 3,              # Low-pass kernel size (milder).
+        lowpass_sigma: float = 0.8,                # Gaussian sigma for low-pass (milder).
+        boundary_smooth_kernel_size: int = 5,      # Kernel size for smoothing boundary weights.
+        boundary_weight_scale: float = 0.25,       # Global scale for boundary weights (reduced impact).
     ):
         super().__init__()
-        assert dims == 2, "当前实现仅支持 2D 特征"
+        assert dims == 2, "This implementation supports 2D features only"
         self.skip_channels = skip_channels
         self.current_channels = current_channels
         self.time_embed_dim = time_embed_dim
@@ -849,16 +817,16 @@ class ASSSFSkipFusion(nn.Module):
         self.use_boundary = use_boundary
         self.use_boundary_in_cond = use_boundary_in_cond
 
-        # 残差融合与门控控制参数
+        # Residual-fusion and gate-control parameters
         self.residual_alpha = residual_alpha
         self.gate_temperature = gate_temperature
         self.gate_limit_min = gate_limit_min
         self.gate_limit_max = gate_limit_max
 
-        self.ctx_proj = linear(current_channels, time_embed_dim)  # 上下文通道投影到 time_embed_dim，匹配尺度
-        self.skip_norm = normalization(skip_channels)  # 对跳跃特征做归一化，稳定后续FiLM/Gate
+        self.ctx_proj = linear(current_channels, time_embed_dim)  # Project context channels to time_embed_dim for scale alignment.
+        self.skip_norm = normalization(skip_channels)  # Normalize skip features to stabilize subsequent FiLM/gating.
         cond_dim = (time_embed_dim if include_class_cond else 0) + time_embed_dim + (1 if use_boundary_in_cond else 0)
-        self.cond_norm = nn.LayerNorm(cond_dim)  # 条件拼接后做层归一化，稳定门控输出
+        self.cond_norm = nn.LayerNorm(cond_dim)  # LayerNorm on concatenated conditions to stabilize gating outputs.
         self.gate_mlp = nn.Sequential(
             linear(cond_dim, gate_hidden_dim),
             nn.SiLU(),
@@ -874,11 +842,11 @@ class ASSSFSkipFusion(nn.Module):
                 bias[2*skip_channels:3*skip_channels] = 0.0
                 bias[3*skip_channels:] = -9.0
 
-        # 更平滑的频域低通：使用固定的高斯深度可分离卷积（每通道独立）
+        # Smoother low-pass filtering: fixed Gaussian depthwise convolution (per-channel).
         k = lowpass_kernel_size
         sig = lowpass_sigma
-        assert k % 2 == 0 or k % 2 == 1, "lowpass_kernel_size 必须为整数"
-        # 构造高斯核
+        assert k % 2 == 0 or k % 2 == 1, "lowpass_kernel_size must be an integer"
+        # Build Gaussian kernel
         coords = th.arange(k, dtype=th.float32)
         yy, xx = th.meshgrid(coords, coords, indexing='ij') if hasattr(th, 'meshgrid') else (None, None)
         if yy is None:
@@ -894,11 +862,11 @@ class ASSSFSkipFusion(nn.Module):
         for p in self.lowpass_conv.parameters():
             p.requires_grad = False
 
-        # 边界权重平滑卷积（单通道）
+        # Boundary-weight smoothing convolution (single-channel).
         weight_bw = gauss.view(1, 1, k, k)
         self.boundary_smooth_conv = nn.Conv2d(1, 1, kernel_size=boundary_smooth_kernel_size, padding=boundary_smooth_kernel_size // 2, groups=1, bias=False)
         with th.no_grad():
-            # 如边界平滑核大小不同，重新生成对应大小的核
+            # If boundary smoothing kernel size differs, regenerate a matching kernel.
             if boundary_smooth_kernel_size != k:
                 k2 = boundary_smooth_kernel_size
                 coords2 = th.arange(k2, dtype=th.float32)
@@ -913,12 +881,12 @@ class ASSSFSkipFusion(nn.Module):
         for p in self.boundary_smooth_conv.parameters():
             p.requires_grad = False
 
-        # 边界加权强度（下调）
+        # Boundary weighting strength (reduced).
         self.boundary_scale = nn.Parameter(th.tensor(0.5))
         self.boundary_weight_scale = boundary_weight_scale
 
     def forward(self, skip_features: th.Tensor, current_features: th.Tensor, c_emb: th.Tensor = None):
-        # 统一 dtype，避免混合精度问题
+        # Unify dtype to avoid mixed-precision issues.
         dtype = current_features.dtype
         raw_skip = skip_features.type(dtype)
         skip_normed = self.skip_norm(raw_skip)
@@ -926,12 +894,12 @@ class ASSSFSkipFusion(nn.Module):
 
         b, c_skip, h, w = raw_skip.shape
 
-        # 当前层全局上下文（GAP）
-        # 使用实际通道数进行展平，确保兼容不同层的上下文通道
+        # Current-layer global context (GAP).
+        # Flatten with the actual channel count to stay compatible across layers.
         ctx = F.adaptive_avg_pool2d(cur, 1).flatten(1)
         ctx = self.ctx_proj(ctx)
 
-        # 边界描述符：即使关闭边界加权，也允许参与门控条件
+        # Boundary descriptor: can participate in gating even if boundary weighting is disabled.
         if self.use_boundary_in_cond:
             local_mean = self.lowpass_conv(raw_skip)
             boundary_map = (raw_skip - local_mean).abs().mean(dim=1, keepdim=True)  # [B,1,H,W]
@@ -939,9 +907,9 @@ class ASSSFSkipFusion(nn.Module):
         else:
             b_desc = None
 
-        # 条件拼接
+        # Condition concatenation
         if self.include_class_cond:
-            assert c_emb is not None, "启用了类别条件，但未提供 c_emb"
+            assert c_emb is not None, "Class conditioning is enabled, but c_emb was not provided"
             if b_desc is not None:
                 cond = th.cat([c_emb, ctx, b_desc], dim=-1)
             else:
@@ -951,13 +919,13 @@ class ASSSFSkipFusion(nn.Module):
                 cond = th.cat([ctx, b_desc], dim=-1)
             else:
                 cond = ctx
-        cond = self.cond_norm(cond)  # 归一化不同来源条件的尺度
+        cond = self.cond_norm(cond)  # Normalize condition scales from different sources.
 
-        # 产生 gate/gamma/beta/w_high（通道维度）
+        # Produce gate/gamma/beta/w_high (channel-wise).
         gate_params = self.gate_mlp(cond)  # [B, C_skip*4]
         gate_params = gate_params.view(b, c_skip, 4)
         gate, gamma, beta, w_high = gate_params.unbind(dim=-1)
-        # 温度控制 + 限幅，避免极端门控
+        # Temperature + clamping to avoid extreme gating.
         gate = th.sigmoid(gate / self.gate_temperature)
         gate = gate.clamp(self.gate_limit_min, self.gate_limit_max)
         gamma = th.tanh(gamma)
@@ -965,20 +933,20 @@ class ASSSFSkipFusion(nn.Module):
         w_high = th.sigmoid(w_high / self.gate_temperature)
         w_high = w_high.clamp(self.gate_limit_min, self.gate_limit_max)
 
-        # FiLM + Gate 调制
+        # FiLM + gate modulation
         gate_broadcast = gate.view(b, c_skip, 1, 1)
         gamma_broadcast = gamma.view(b, c_skip, 1, 1)
         beta_broadcast = beta.view(b, c_skip, 1, 1)
-        # 保持 FiLM 调制，但整体影响将通过残差式融合弱化
+        # Keep FiLM modulation, but weaken overall impact via residual fusion.
         skip_mod = gate_broadcast * (gamma_broadcast * raw_skip + beta_broadcast)
 
         if self.use_freq:
-            # 使用更平滑的高斯低通
+            # Use smoother Gaussian low-pass.
             low = self.lowpass_conv(skip_mod)
             high = skip_mod - low
 
             if self.use_boundary:
-                # 边界权重下调并平滑
+                # Reduce and smooth boundary weights.
                 boundary_map = (skip_mod - low).abs().mean(dim=1, keepdim=True)  # [B,1,H,W]
                 b_weight_raw = th.sigmoid(self.boundary_scale * boundary_map)     # [B,1,H,W]
                 b_weight = self.boundary_smooth_conv(b_weight_raw) * self.boundary_weight_scale
@@ -990,7 +958,7 @@ class ASSSFSkipFusion(nn.Module):
         else:
             fused = skip_mod
 
-        # 弱化门控，改为残差式融合，保证近似恒等
+        # Weaken gating via residual fusion to keep the module near-identity.
         out = raw_skip + self.residual_alpha * gate_broadcast * (fused - raw_skip)
         
         return out.type(dtype)
@@ -1127,9 +1095,7 @@ class UNetModel(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         clf_free=True,
-        use_pyramid_fusion=False,  # 默认关闭金字塔融合
-        pyramid_fusion_levels=None,  # 指定在哪些层级启用金字塔融合
-        use_as_ssf=True,
+        use_as_ssf=False,
         as_ssf_levels=None,
         as_ssf_gate_dim=64,
     ):
@@ -1187,7 +1153,7 @@ class UNetModel(nn.Module):
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
-                    ResBlock(
+                    LightResBlock(
                         ch,
                         time_embed_dim,
                         dropout,
@@ -1262,7 +1228,7 @@ class UNetModel(nn.Module):
         )
         self._feature_size += ch
 
-        # 保存 input_block_chans 的副本，因为在构建 output_blocks 时会被 pop() 清空
+        # Keep a copy of input_block_chans since pop() will consume it when building output_blocks.
         input_block_chans_copy = input_block_chans.copy()
 
         self.output_blocks = nn.ModuleList([])
@@ -1270,7 +1236,7 @@ class UNetModel(nn.Module):
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
                 layers = [
-                    ResBlock(
+                    LightResBlock(
                         ch + ich,
                         time_embed_dim,
                         dropout,
@@ -1316,48 +1282,8 @@ class UNetModel(nn.Module):
             nn.Identity(),
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
-        
-        # 初始化多尺度金字塔融合模块
-        self.use_pyramid_fusion = use_pyramid_fusion
-        self.pyramid_fusion_blocks = nn.ModuleDict()
-        
-        # 更新 input_block_chans 为最终的完整列表（使用副本）
-        self.input_block_chans = input_block_chans_copy
-        
-        if use_pyramid_fusion:
-            # 如果未指定层级，默认在 32×32 分辨率启用金字塔融合（按需求修改）
-            if pyramid_fusion_levels is None:
-                # 根据 channel_mult 及网络金字塔层级映射：
-                # Level 0: 128×128（或输入最高分辨率）
-                # Level 1: 64×64
-                # Level 2: 32×32  ← 仅在该层应用金字塔跳跃连接
-                # Level 3: 16×16
-                pyramid_fusion_levels = [2] if len(channel_mult) > 2 else []
-            
-            # 为每个指定的层级创建金字塔融合模块
-            output_block_idx = 0
-            for level, mult in list(enumerate(channel_mult))[::-1]:
-                for i in range(num_res_blocks + 1):
-                    if level in pyramid_fusion_levels and output_block_idx < len(input_block_chans_copy):
-                        # 获取对应的跳跃连接通道数和当前层通道数
-                        skip_ch = input_block_chans_copy[-(output_block_idx + 1)]  # 对应的跳跃连接通道数
-                        current_ch = int(model_channels * mult)  # 当前层通道数
-                        
-                        # 确保跳跃连接通道数能被膨胀率数量整除
-                        if skip_ch % 2 == 0:  # 使用2个膨胀率 (1, 3) 以兼容更多通道数
-                            fusion_key = f"level_{level}_block_{i}"
-                            self.pyramid_fusion_blocks[fusion_key] = PyramidFusionBlock(
-                                skip_channels=skip_ch,
-                                current_channels=current_ch,
-                                dims=dims,
-                                dilation_rates=(1, 3),  # 使用2个膨胀率
-                                reduction=8,
-                                use_checkpoint=use_checkpoint,
-                                num_heads=self.num_heads_upsample,
-                            )
-                    output_block_idx += 1
-        
-        # 初始化 AS-SSF 跳跃选择性融合模块（默认在 32×32 层级启用）
+
+        # Initialize AS-SSF skip selective fusion module (default: as_ssf_levels=[3] when enabled).
         self.use_as_ssf = use_as_ssf
         self.as_ssf_blocks = nn.ModuleDict()
         if self.use_as_ssf:
@@ -1365,12 +1291,12 @@ class UNetModel(nn.Module):
                 as_ssf_levels = [3]
 
             output_block_idx = 0
-            ch_tracker = int(channel_mult[-1] * model_channels)  # 与 middle_block 输出一致的初始通道数
+            ch_tracker = int(channel_mult[-1] * model_channels)  # Initial channel count matches middle_block output.
             for level, mult in list(enumerate(channel_mult))[::-1]:
                 for i in range(num_res_blocks + 1):
                     if level in as_ssf_levels and output_block_idx < len(input_block_chans_copy):
                         skip_ch = input_block_chans_copy[-(output_block_idx + 1)]
-                        current_ch = ch_tracker  # 使用当前块之前的通道数作为 AS-SSF 的上下文通道
+                        current_ch = ch_tracker  # Use pre-block channel count as AS-SSF context channels.
                         fusion_key = f"level_{level}_block_{i}"
                         self.as_ssf_blocks[fusion_key] = ASSSFSkipFusion(
                             skip_channels=skip_ch,
@@ -1390,7 +1316,7 @@ class UNetModel(nn.Module):
                             lowpass_sigma=0.8,
                             boundary_weight_scale=0.25,
                         )
-                    # 更新跟踪通道为该层目标输出通道（与构建 output_blocks 的逻辑一致）
+                    # Update tracked channels to match output_blocks construction.
                     ch_tracker = int(model_channels * mult)
                     output_block_idx += 1
 
@@ -1476,24 +1402,18 @@ class UNetModel(nn.Module):
             hs.append(h)
         h = self.middle_block(h, emb, cemb_mm)
         
-        # 处理输出块，集成金字塔融合
         output_block_idx = 0
         for level, mult in list(enumerate(self.channel_mult))[::-1]:
             for i in range(self.num_res_blocks + 1):
                 skip_features = hs.pop()
                 
                 fusion_key = f"level_{level}_block_{i}"
-                # 优先使用 AS-SSF；如未启用或缺少该层，则回退到原始或金字塔融合
                 if self.use_as_ssf and fusion_key in self.as_ssf_blocks:
                     enhanced_skip = self.as_ssf_blocks[fusion_key](skip_features, h, cond_cemb)
-                    h = th.cat([h, enhanced_skip], dim=1)
-                elif self.use_pyramid_fusion and fusion_key in self.pyramid_fusion_blocks:
-                    enhanced_skip = self.pyramid_fusion_blocks[fusion_key](skip_features, h)
                     h = th.cat([h, enhanced_skip], dim=1)
                 else:
                     h = th.cat([h, skip_features], dim=1)
                 
-                # 应用对应的输出块
                 h = self.output_blocks[output_block_idx](h, emb, cemb_mm)
                 output_block_idx += 1
         

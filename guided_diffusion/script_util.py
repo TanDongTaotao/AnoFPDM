@@ -295,6 +295,8 @@ def create_model(
     # Add specific parameters for different UNet versions
     if unet_ver == "bea":
         model_kwargs["use_bea"] = use_bea
+    elif unet_ver == "dilated":
+        model_kwargs["use_as_ssf"] = False
     elif unet_ver == "bea_dual_loss":
         model_kwargs["use_bea"] = use_bea
         model_kwargs["return_features"] = True  # Enable feature return for dual loss

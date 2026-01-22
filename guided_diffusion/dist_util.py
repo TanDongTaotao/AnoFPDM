@@ -46,10 +46,10 @@ def load_state_dict(path, **kwargs):
     return data
 
 
-# 移除分布式参数同步函数
+# Removed distributed parameter synchronization function
 # def sync_params(params):
 #     ...
 
-# 移除查找空闲端口函数
+# Removed free-port discovery function
 # def _find_free_port():
 #     ...

@@ -18,14 +18,15 @@ import functools
 
 def clamp_to_spatial_quantile(x: th.Tensor, **kwargs):
     """
-    将输入张量按空间维度进行裁剪并归一化，使其值被限制在空间维度绝对值的特定分位数范围内。
+    Clamp and normalize an input tensor over spatial dimensions so values are limited
+    within a specified quantile of the absolute values computed per spatial location.
 
-    参数:
-    x (th.Tensor): 输入的 PyTorch 张量，形状通常为 [batch_size, channels, *spatial_dims]。
-    **kwargs: 预留的关键字参数，当前函数未使用。
+    Args:
+        x (th.Tensor): Input PyTorch tensor, typically shaped as [batch_size, channels, *spatial_dims].
+        **kwargs: Reserved keyword arguments (currently unused).
 
-    返回:
-    th.Tensor: 裁剪并归一化后的张量，形状与输入张量 x 相同。
+    Returns:
+        th.Tensor: The clamped and normalized tensor with the same shape as x.
     """
     p = 0.99
     b, c, *spatial = x.shape
@@ -40,17 +41,19 @@ def clamp_to_spatial_quantile(x: th.Tensor, **kwargs):
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
     """
-    根据给定的名称获取预定义的 beta 调度。
+    Get a predefined beta schedule by name.
 
-    beta 调度库包含在扩散步数趋于极限时仍保持相似特性的 beta 调度。
-    可以添加新的 beta 调度，但为了保持向后兼容性，一旦提交的调度不应被移除或修改。
+    The beta schedule library contains schedules that remain similar in behavior
+    as the number of diffusion steps changes. New schedules may be added, but for
+    backward compatibility, schedules that have been shipped should not be removed
+    or modified.
 
-    参数:
-    schedule_name (str): 要获取的 beta 调度的名称。
-    num_diffusion_timesteps (int): 扩散过程的时间步数。
+    Args:
+        schedule_name (str): Name of the beta schedule to retrieve.
+        num_diffusion_timesteps (int): Number of timesteps in the diffusion process.
 
-    返回:
-    np.ndarray: 包含每个时间步对应 beta 值的一维 NumPy 数组。
+    Returns:
+        np.ndarray: A 1-D NumPy array of beta values, one per timestep.
     """
     if schedule_name == "linear":
         # Linear schedule from Ho et al, extended to work for any number of
@@ -72,17 +75,19 @@ def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
 
 def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
     """
-   创建一个 beta 调度，该调度离散化给定的 alpha_t_bar 函数，
-    此函数定义了从 t = [0,1] 时间段内 (1-beta) 的累积乘积。
+    Create a beta schedule that discretizes a given alpha_t_bar function.
 
-    参数:
-    num_diffusion_timesteps (int): 要生成的 beta 数量。
-    alpha_bar (function): 一个 lambda 函数，接收 0 到 1 之间的参数 t，
-                          并返回扩散过程到该时间点 (1-beta) 的累积乘积。
-    max_beta (float): 要使用的最大 beta 值；使用小于 1 的值可防止出现奇点。
+    The alpha_t_bar function defines the cumulative product of (1 - beta) over
+    the time interval t in [0, 1].
 
-    返回:
-    np.ndarray: 包含每个时间步对应 beta 值的一维 NumPy 数组。
+    Args:
+        num_diffusion_timesteps (int): Number of betas to generate.
+        alpha_bar (function): A lambda that takes t in [0, 1] and returns the cumulative
+            product of (1 - beta) up to that time in the diffusion process.
+        max_beta (float): Maximum beta value to use; values less than 1 help avoid singularities.
+
+    Returns:
+        np.ndarray: A 1-D NumPy array of beta values, one per timestep.
     """
     betas = []
     for i in range(num_diffusion_timesteps):
@@ -154,24 +159,24 @@ class GaussianDiffusion:
         loss_type,
         rescale_timesteps=False,
     ):
-        # 存储模型相关类型和是否重新缩放时间步的标志
+        # Store model type metadata and whether to rescale timesteps.
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
         self.rescale_timesteps = rescale_timesteps
 
         # Use float64 for accuracy.
-        # 将 betas 转换为 float64 类型的 NumPy 数组
+        # Convert betas to a float64 NumPy array.
         betas = np.array(betas, dtype=np.float64)
         self.betas = betas
-        # 检查 betas 是否为一维数组
+        # Ensure betas is a 1-D array.
         assert len(betas.shape) == 1, "betas must be 1-D"
         assert (betas > 0).all() and (betas <= 1).all()
 
-        # 记录扩散步数
+        # Record number of diffusion steps.
         self.num_timesteps = int(betas.shape[0])
 
-        # 计算 alphas 及其累积乘积相关值
+        # Compute alphas and cumulative products.
         alphas = 1.0 - betas
         self.alphas_cumprod = np.cumprod(alphas, axis=0)
         self.alphas_cumprod_prev = np.append(1.0, self.alphas_cumprod[:-1])
@@ -179,7 +184,7 @@ class GaussianDiffusion:
         assert self.alphas_cumprod_prev.shape == (self.num_timesteps,)
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
-        # 计算前向扩散过程相关值
+        # Compute forward diffusion process values.
         self.sqrt_alphas_cumprod = np.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - self.alphas_cumprod)
         self.log_one_minus_alphas_cumprod = np.log(1.0 - self.alphas_cumprod)
@@ -187,7 +192,7 @@ class GaussianDiffusion:
         self.sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / self.alphas_cumprod - 1)
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
-        # 计算后验分布相关值
+        # Compute posterior distribution values.
         self.posterior_variance = (
             betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
