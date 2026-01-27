@@ -4,7 +4,13 @@ from kornia.filters import sobel
 import torch.nn.functional as F
 from sample import sample
 from evaluate import evaluate, median_pool
-from snr_weighting import get_mask_batch_FPDM_with_snr_weighting
+try:
+    from snr_weighting import get_mask_batch_FPDM_with_snr_weighting
+except ModuleNotFoundError:
+    def get_mask_batch_FPDM_with_snr_weighting(*args, **kwargs):
+        raise ModuleNotFoundError(
+            "snr_weighting module is missing; disable --enable_snr_weighting or add its implementation."
+        )
 
 
 # %% This block is for the proposed method
